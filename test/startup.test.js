@@ -13,6 +13,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { apply } from '../index.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/** An isolated harness home, so persistence never touches the real profile. */
+function isolatedHome() {
+  return mkdtempSync(join(tmpdir(), 'dfo-start-'));
+}
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -31,6 +39,7 @@ function stubContext({ routes = [], credentials = null, webServer = true } = {})
     get(name) {
       if (name === 'webServer') return webServer ? server : undefined;
       if (name === 'credentials') return credentials;
+      if (name === 'homePaths') return { homeDir: isolatedHome() };
       return undefined;
     },
     inject(names, callback) {

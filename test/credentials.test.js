@@ -21,6 +21,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { apply } from '../index.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/** The plugin persists notice recipients under the harness home; a test must
+ *  use its own so it neither reads nor writes the real profile. */
+function isolatedHome() {
+  return mkdtempSync(join(tmpdir(), 'dfo-cred-'));
+}
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -70,6 +79,7 @@ function stubContext({ routes = [], store = new Map(), webServer = true, keys = 
     get(name) {
       if (name === 'webServer') return webServer ? server : undefined;
       if (name === 'credentials') return credentialService;
+      if (name === 'homePaths') return { homeDir: isolatedHome() };
       return undefined;
     },
     inject(names, callback) {

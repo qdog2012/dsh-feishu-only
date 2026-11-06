@@ -32,6 +32,9 @@ import { MENU, describeMenuError, syncSlashMenu } from './lib/menu.js';
 import { diagnose } from './lib/diagnostics.js';
 import { noticeTarget, sendConnectionNotice, shouldSuppress } from './lib/notify.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 /**
  * Identifies this module instance.
@@ -116,18 +119,72 @@ export async function apply(ctx, rawConfig) {
    * Operators the bridge has seen, keyed by open id with the time they last
    * spoke.
    *
-   * This lives at `apply` scope, not per connection: a connection notice is
-   * meant for whoever has been using the bot, and a reconnect — from the
-   * settings page or a restart — must not forget them. The most recent one is
-   * the notice target.
+   * This lives at `apply` scope and is persisted, because the notice that
+   * matters most — "I am connected again" — is sent at startup, before anyone
+   * has had a chance to talk to the bot. Without persistence the first connect
+   * after every restart has no recipient, which is exactly when a notice is
+   * wanted.
    */
   const operators = new Map();
   const rememberOperator = (openId) => {
     if (!openId) return;
+    const already = operators.has(openId);
     operators.set(openId, { lastSeen: Date.now() });
+    // Only the first sighting of a person is worth a disk write; a message per
+    // second must not turn into a write per second.
+    if (!already) void persistOperators();
   };
   /** When the last notice went out, for flap suppression. */
   let lastNoticeAt = NaN;
+
+  /** Where the notice recipients survive a restart. */
+  const operatorsFile = () => {
+    try {
+      const home = ctx.get?.('homePaths')?.homeDir
+        ?? process.env.DSH_HOME
+        ?? join(homedir(), '.dsh');
+      return join(home, 'feishu-only.operators.json');
+    } catch {
+      return null;
+    }
+  };
+
+  async function loadOperators() {
+    const file = operatorsFile();
+    if (!file) return;
+    try {
+      const raw = await readFile(file, 'utf8');
+      const parsed = JSON.parse(raw);
+      for (const [openId, entry] of Object.entries(parsed?.operators ?? {})) {
+        const lastSeen = Number(entry?.lastSeen);
+        if (typeof openId === 'string' && openId && Number.isFinite(lastSeen)) {
+          operators.set(openId, { lastSeen });
+        }
+      }
+      if (operators.size > 0) {
+        logger.debug?.(`[feishu] loaded ${operators.size} operator(s) for connection notices`);
+      }
+    } catch (error) {
+      // A missing or unreadable file only costs the first notice after a
+      // restart; it must never affect startup.
+      if (error?.code !== 'ENOENT') {
+        logger.warn?.(`[feishu] could not read the operator list: ${error?.message ?? error}`);
+      }
+    }
+  }
+
+  async function persistOperators() {
+    const file = operatorsFile();
+    if (!file) return;
+    try {
+      const plain = {};
+      for (const [openId, entry] of operators) plain[openId] = { lastSeen: entry.lastSeen };
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, JSON.stringify({ version: 1, operators: plain }, null, 2), 'utf8');
+    } catch (error) {
+      logger.warn?.(`[feishu] could not save the operator list: ${error?.message ?? error}`);
+    }
+  }
 
   /**
    * Start the connection for one credential pair and wire every handler.
@@ -321,6 +378,10 @@ export async function apply(ctx, rawConfig) {
     const startupConfig = { appId: config.appId, brand: config.brand };
     const attemptStartup = async () => {
       try {
+        // Load the notice recipients before connecting: the "connected" notice
+        // is sent as soon as the socket opens, so the list must already be
+        // there. Reading it here also keeps a failure off the launch path.
+        await loadOperators();
         const inline = Boolean(config.appSecret);
         const secret = config.appSecret || await readStoredSecret(ctx, startupConfig.appId);
         noteDiagnostic({
@@ -779,6 +840,54 @@ export async function apply(ctx, rawConfig) {
     void stopRuntime();
     state.clear();
   }, 'dsh-feishu-only.teardown()');
+
+  // ---------------------------------------------------------------- exit notice
+
+  /**
+   * Tell the operator the bot is going away.
+   *
+   * A restart is the one disconnect nobody can be told about afterwards, and
+   * the socket does not close politely — the process is killed. So the notice
+   * is sent from the exit hook itself, with a short deadline: the app is
+   * shutting down and must not wait on the network.
+   *
+   * `beforeExit` cannot await, so the send is started and the process is given
+   * a moment to flush it. Signal handlers run first when the OS is asked to
+   * terminate, which covers the usual restart path.
+   */
+  let exitNoticeSent = false;
+  const sendExitNotice = (reason) => {
+    if (exitNoticeSent) return;
+    exitNoticeSent = true;
+    const current = runtime;
+    const openId = noticeTarget(operators);
+    if (!current || !openId || !config.notifyConnection) return;
+    void sendConnectionNotice(
+      { api: current.api, logger },
+      { openId, event: 'disconnected', reason },
+    );
+  };
+
+  const onSignal = (signal) => {
+    sendExitNotice(`应用正在退出（${signal}）`);
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+    try {
+      process.on(signal, onSignal);
+    } catch {
+      // A runtime without this signal simply does not offer it.
+    }
+  }
+  process.on('beforeExit', () => sendExitNotice('应用已退出'));
+  ctx.effect(() => () => {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+      try {
+        process.off(signal, onSignal);
+      } catch {
+        // Nothing was registered for this signal.
+      }
+    }
+  }, 'dsh-feishu-only.exit-hooks()');
 }
 
 /** Read the app secret from the credential service. */

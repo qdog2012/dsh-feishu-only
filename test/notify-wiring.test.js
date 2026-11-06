@@ -7,9 +7,23 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { apply } from '../index.js';
 import { encodeFrame } from '../lib/feishu/ws.js';
+
+/**
+ * A throwaway home directory.
+ *
+ * The plugin persists its notice recipients under the harness home; without
+ * this a test would read (and write) the real profile, which both polluted the
+ * user's data and made assertions depend on it.
+ */
+function isolatedHome() {
+  return mkdtempSync(join(tmpdir(), 'dfo-wiring-'));
+}
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -42,7 +56,7 @@ function messageFrame(openId, text) {
 }
 
 /** A context whose services are present immediately, so the startup path runs. */
-function stubContext({ routes = [], store = new Map() } = {}) {
+function stubContext({ routes = [], store = new Map(), home } = {}) {
   const server = { register(route) { routes.push(route); return () => {}; } };
   const credentials = {
     async readRecord(key) { return store.get(key) ?? null; },
@@ -53,6 +67,9 @@ function stubContext({ routes = [], store = new Map() } = {}) {
     get(name) {
       if (name === 'webServer') return server;
       if (name === 'credentials') return credentials;
+      // An isolated home: the plugin persists its notice recipients there, and
+      // a test must never read or write the real profile.
+      if (name === 'homePaths') return { homeDir: home };
       return undefined;
     },
     inject(names, callback) {
@@ -167,11 +184,16 @@ async function withLiveBridge(options, run) {
     async readRecord(key) { return store.get(key) ?? null; },
     async modifyRecord(key, produce) { store.set(key, await produce()); },
   };
+  // One home per run, so a notice recipient from an earlier test cannot leak in.
+  const home = isolatedHome();
   const ctx = {
     logger: silent,
     get(name) {
       if (name === 'webServer') return server;
       if (name === 'credentials') return credentials;
+      // An isolated home: the plugin persists its notice recipients there, and
+      // a test must never read or write the real profile.
+      if (name === 'homePaths') return { homeDir: home };
       return undefined;
     },
     inject(names, callback) {
