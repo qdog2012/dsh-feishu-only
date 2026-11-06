@@ -39,27 +39,45 @@ Or, in this checkout:
 dsh --profile <profile> plugin add /absolute/path/to/dsh-feishu-only
 ```
 
-Then enable the `dsh-feishu-only` row and open the plugin's settings to connect
-a bot.
+Then enable the `dsh-feishu-only` row and open **设置 → 飞书机器人** in the Web UI.
 
 ## Connect a bot
 
-Two independent paths, because they answer different questions:
+The settings page (**设置 → 飞书机器人**) is the front door for onboarding. It
+offers two independent paths, because they answer different questions:
 
-**Create** — `POST /plugins/dsh-feishu-only/qr` starts a device authorization.
-The response carries a verification URL to render as a QR plus an expiry. Poll
-`GET /plugins/dsh-feishu-only/qr` for the state. When the user finishes in their
-Feishu client, `poll` returns the new `client_id` / `client_secret`; the block
-stores the secret in the credential service and connects immediately.
+**Create** — press *生成授权二维码*. The page starts a device authorization and
+renders the verification QR from
+`GET /plugins/dsh-feishu-only/qr-image?url=…`, which only draws the URL this
+plugin itself issued. Scan with the Feishu mobile app; the page follows the
+scan on its own and completes the connection.
 
-**Connect existing** — `POST /plugins/dsh-feishu-only/connect` with
-`{ "appId": "cli_…", "appSecret": "…" }`. The credential pair is verified against
-`/open-apis/bot/v3/info/` before it is saved, so a pair that cannot read its own
-bot identity is rejected rather than half-connected.
+**Connect existing** — enter an App ID and Secret in the second card. The pair
+is verified against `/open-apis/bot/v3/info/` *before* it is saved, so a pair
+that cannot read its own bot identity is rejected rather than half-connected.
+The secret goes to the credential store and is cleared from page state; it is
+never echoed back or written to the profile file.
 
-`GET /plugins/dsh-feishu-only/verify` checks the three layers separately —
-robot identity, message connection, card callback — and reports the executor
-state as a fourth. Bot reboot is not required.
+The status card reports the robot, message and executor layers separately, has
+a one-click *检查接入* check, and a *断开连接* that stops the connection and
+forgets the secret while keeping the App ID.
+
+The same capabilities are reachable over HTTP, which is what the page uses:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /plugins/dsh-feishu-only/status` | Connection, bot identity, capabilities, registration state |
+| `GET /plugins/dsh-feishu-only/qr?start=1` | Start (or reuse) a device authorization |
+| `GET /plugins/dsh-feishu-only/qr` | Poll the current registration |
+| `GET /plugins/dsh-feishu-only/qr-image?url=…` | The QR as SVG, for the issued URL only |
+| `GET /plugins/dsh-feishu-only/qr/cancel?cancel=1` | Cancel the attempt |
+| `GET /plugins/dsh-feishu-only/connect?appId=…&appSecret=…` | Verify and save a credential pair |
+| `GET /plugins/dsh-feishu-only/verify` | The three-layer check |
+| `GET /plugins/dsh-feishu-only/disconnect?confirm=1` | Stop the connection and forget the secret |
+
+`resource` routes answer GET/HEAD only, so the signals travel as query flags
+rather than methods. The QR encoder is small and lives in `lib/qr.js`; it was
+verified byte-for-byte against an independent decoder before shipping.
 
 ### Required platform configuration
 
@@ -137,7 +155,7 @@ record rather than in plain text.
 ## Development
 
 ```bash
-npm test     # 182 tests, node:test only
+npm test     # 204 tests, node:test only
 npm run check
 ```
 
@@ -149,9 +167,11 @@ definition.
 
 ```
 index.js              plugin entry: config, runtime lifecycle, HTTP routes
+client.js             Web UI settings page (settings.section): QR + manual
 lib/
   config.js           field metadata, schema document, validation
   cards.js            every card the bridge sends
+  qr.js              QR encoder (byte mode, level M) for the onboarding page
   commands/parse.js   the slash-command grammar
   state.js            current task, snapshots, staged images, interactions
   harness.js          adapter over Host services (all optional)

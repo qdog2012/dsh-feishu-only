@@ -51,7 +51,9 @@ test('every HTTP route registers under the plugin prefix', async () => {
   const paths = routes.map((route) => route.path).sort();
   assert.deepEqual(paths, [
     '/plugins/dsh-feishu-only/connect',
+    '/plugins/dsh-feishu-only/disconnect',
     '/plugins/dsh-feishu-only/qr',
+    '/plugins/dsh-feishu-only/qr-image',
     '/plugins/dsh-feishu-only/qr/cancel',
     '/plugins/dsh-feishu-only/status',
     '/plugins/dsh-feishu-only/verify',
@@ -131,7 +133,35 @@ test('teardown disposers remove every registered route', async () => {
     return () => {};
   };
   await apply(ctx, { enabled: false });
-  assert.equal(routes.length, 5);
+  assert.equal(routes.length, 7);
   for (const dispose of disposers) dispose();
   assert.equal(routes.length, 0);
+});
+
+test('the qr-image route refuses a URL it did not issue', async () => {
+  // Without this guard the endpoint would be an open QR generator.
+  const { find } = await load();
+  const route = find('/qr-image');
+  const response = await route.resource(new Request(
+    `http://x/plugins/dsh-feishu-only/qr-image?url=${encodeURIComponent('https://evil.example/anything')}`,
+  ));
+  assert.equal(response.status, 404);
+});
+
+test('the qr-image route refuses a missing url', async () => {
+  const { find } = await load();
+  const response = await find('/qr-image').resource(
+    new Request('http://x/plugins/dsh-feishu-only/qr-image'),
+  );
+  assert.equal(response.status, 404);
+});
+
+test('the disconnect route requires explicit confirmation', async () => {
+  const { find } = await load();
+  const response = await find('/disconnect').resource(
+    new Request('http://x/plugins/dsh-feishu-only/disconnect'),
+  );
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.match(body.error, /confirm/u);
 });

@@ -27,6 +27,7 @@ import { HarnessAdapter } from './lib/harness.js';
 import { InteractionBridge } from './lib/interactions.js';
 import { FeishuBridge } from './lib/bridge.js';
 import { PreviewService } from './lib/preview.js';
+import { qrSvg } from './lib/qr.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
 
 /**
@@ -262,8 +263,61 @@ export async function apply(ctx, rawConfig) {
 
     routeDisposers.push(webServer.register({
       kind: 'exact',
+      path: `${base}/qr-image`,
+      resource: async (request) => {
+        const url = new URL(request.url);
+        const target = url.searchParams.get('url') ?? '';
+        // Only the verification URL this plugin actually issued is rendered, so
+        // the endpoint cannot be used as a general "make me a QR" service.
+        const issued = registration?.qrCode?.url;
+        if (!target || !issued || target !== issued) {
+          return new Response('unknown registration', {
+            status: 404,
+            headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+          });
+        }
+        try {
+          const svg = qrSvg(target, { scale: 6, border: 4 });
+          return new Response(svg, {
+            headers: {
+              'content-type': 'image/svg+xml; charset=utf-8',
+              'cache-control': 'no-store',
+            },
+          });
+        } catch (error) {
+          return new Response(`cannot render QR: ${error?.message ?? error}`, {
+            status: 500,
+            headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+          });
+        }
+      },
+    }));
+
+    routeDisposers.push(webServer.register({
+      kind: 'exact',
       path: `${base}/verify`,
       resource: async () => verifyConnected(),
+    }));
+
+    routeDisposers.push(webServer.register({
+      kind: 'exact',
+      path: `${base}/disconnect`,
+      resource: async (request) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get('confirm') !== '1') {
+          return json({ ok: false, error: '需要 confirm=1' }, 400);
+        }
+        // Disconnecting drops the live connection and the stored secret but
+        // keeps the app identity, so reconnecting needs no re-entry of the ID.
+        registration?.cancel();
+        registration = null;
+        await stopRuntime();
+        await clearStoredSecret(ctx, config.appId);
+        await saveConfig({ enabled: false });
+        botInfo = null;
+        lastError = null;
+        return json({ ok: true, ...buildStatus() });
+      },
     }));
   }
 
