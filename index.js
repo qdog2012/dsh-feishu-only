@@ -28,6 +28,7 @@ import { InteractionBridge } from './lib/interactions.js';
 import { FeishuBridge } from './lib/bridge.js';
 import { PreviewService } from './lib/preview.js';
 import { qrSvg } from './lib/qr.js';
+import { MENU, describeMenuError, syncSlashMenu } from './lib/menu.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
 
 /**
@@ -67,6 +68,8 @@ export async function apply(ctx, rawConfig) {
   let botInfo = null;
   /** Why the last connection attempt failed, for `/status` and the settings page. */
   let lastError = null;
+  /** Outcome of the last slash-menu reconcile, surfaced through `/status`. */
+  let menuReport = null;
 
   /**
    * A small ring of recent inbound/outbound outcomes.
@@ -191,6 +194,23 @@ export async function apply(ctx, rawConfig) {
       dispose: shutdown,
     };
     logger.info?.(`[feishu] bridge is live for app ${appId} (${brand})`);
+
+    // Publish the `/` menu in the background: it is discoverability, not a
+    // prerequisite for receiving messages, so a failure here must not keep the
+    // bridge down. The result is reported once through `/status`.
+    if (config.syncMenu) {
+      void syncSlashMenu(api, { logger })
+        .then((report) => {
+          menuReport = report;
+          if (report.failed.length > 0) {
+            lastError = `菜单同步未完成：${report.failed[0].error}`;
+          }
+        })
+        .catch((error) => {
+          lastError = `菜单同步失败：${describeMenuError(error)}`;
+          logger.warn?.(`[feishu] ${lastError}`);
+        });
+    }
     return runtime;
   }
 
@@ -332,6 +352,29 @@ export async function apply(ctx, rawConfig) {
 
     routeDisposers.push(webServer.register({
       kind: 'exact',
+      path: `${base}/menu`,
+      resource: async (request) => {
+        const url = new URL(request.url);
+        if (!runtime) return json({ ok: false, error: '尚未连接机器人' }, 400);
+        if (url.searchParams.get('sync') === '1') {
+          try {
+            const report = await syncSlashMenu(runtime.api, { logger });
+            return json({ ok: report.failed.length === 0, report });
+          } catch (error) {
+            return json({ ok: false, error: describeMenuError(error) }, 500);
+          }
+        }
+        try {
+          const items = await runtime.api.listSlashCommands();
+          return json({ ok: true, items, wanted: MENU.map((item) => item.command) });
+        } catch (error) {
+          return json({ ok: false, error: describeMenuError(error) }, 400);
+        }
+      },
+    }));
+
+    routeDisposers.push(webServer.register({
+      kind: 'exact',
       path: `${base}/verify`,
       resource: async () => verifyConnected(),
     }));
@@ -384,6 +427,8 @@ export async function apply(ctx, rawConfig) {
       recent: [...diagnostics],
       /** Set once a reply was rejected for out-of-scope availability. */
       availabilityWarning: availabilityWarning(),
+      /** The `/` menu reconcile result, or null before it ran. */
+      menu: menuReport,
     };
   }
 

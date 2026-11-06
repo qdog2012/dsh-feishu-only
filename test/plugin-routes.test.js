@@ -71,6 +71,7 @@ test('every HTTP route registers under the plugin prefix', async () => {
   assert.deepEqual(paths, [
     '/plugins/dsh-feishu-only/connect',
     '/plugins/dsh-feishu-only/disconnect',
+    '/plugins/dsh-feishu-only/menu',
     '/plugins/dsh-feishu-only/qr',
     '/plugins/dsh-feishu-only/qr-image',
     '/plugins/dsh-feishu-only/qr/cancel',
@@ -152,7 +153,7 @@ test('teardown disposers remove every registered route', async () => {
     return () => {};
   };
   await apply(ctx, { enabled: false });
-  assert.equal(routes.length, 7);
+  assert.equal(routes.length, 8);
   for (const dispose of disposers) dispose();
   assert.equal(routes.length, 0);
 });
@@ -174,7 +175,7 @@ test('routes are declared through ctx.inject, not a one-shot service read', asyn
     injected.some((names) => names.includes('webServer')),
     'webServer must be injected so registration waits for the carrier',
   );
-  assert.equal(routes.length, 7, 'and the routes still register once it is ready');
+  assert.equal(routes.length, 8, 'and the routes still register once it is ready');
 });
 
 test('re-injecting the carrier replaces routes instead of duplicating them', async () => {
@@ -187,11 +188,11 @@ test('re-injecting the carrier replaces routes instead of duplicating them', asy
     return originalInject(names, callback);
   };
   await apply(ctx, { enabled: false });
-  assert.equal(routes.length, 7);
+  assert.equal(routes.length, 8);
 
   // The service is replaced; Cordis calls the inject callback again.
   rerun({ webServer: { register: (route) => { routes.push(route); return () => {}; } } });
-  assert.equal(routes.length, 7, 'the previous generation was released first');
+  assert.equal(routes.length, 8, 'the previous generation was released first');
 });
 
 test('the qr-image route refuses a URL it did not issue', async () => {

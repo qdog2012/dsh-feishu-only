@@ -73,7 +73,27 @@ The same capabilities are reachable over HTTP, which is what the page uses:
 | `GET /plugins/dsh-feishu-only/qr/cancel?cancel=1` | Cancel the attempt |
 | `GET /plugins/dsh-feishu-only/connect?appId=…&appSecret=…` | Verify and save a credential pair |
 | `GET /plugins/dsh-feishu-only/verify` | The three-layer check |
+| `GET /plugins/dsh-feishu-only/menu?sync=1` | Publish/reconcile the `/` command menu |
 | `GET /plugins/dsh-feishu-only/disconnect?confirm=1` | Stop the connection and forget the secret |
+
+### The `/` command menu
+
+The panel a user sees when typing `/` in a chat is the only discoverable entry
+point, so the bridge publishes its commands there. The reconcile is idempotent
+and runs once after connecting (`syncMenu`, on by default):
+
+- **Creates** any command in `lib/menu.js` that the app lacks, in reverse order
+  because Feishu lists newest first and resolves ordering only per second.
+- **Keeps** an entry whose hint already matches.
+- **Replaces** a same-named entry registered by another plugin with a different
+  hint. The API has no update, so this is a delete + create; leaving it would
+  advertise behaviour this bridge does not have.
+- **Removes** any registered command that is not in the menu. A panel entry the
+  parser rejects is a dead button, regardless of which plugin added it.
+
+Needs `application:app_slash_command:read` and `application:app_slash_command:write`.
+Without them the bridge still works — the menu just is not published, and
+`/status` reports the missing scope as an instruction.
 
 `resource` routes answer GET/HEAD only, so the signals travel as query flags
 rather than methods. The QR encoder is small and lives in `lib/qr.js`; it was
@@ -155,7 +175,7 @@ record rather than in plain text.
 ## Development
 
 ```bash
-npm test     # 204 tests, node:test only
+npm test     # 230 tests, node:test only
 npm run check
 ```
 
