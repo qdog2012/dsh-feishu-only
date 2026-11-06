@@ -200,18 +200,29 @@ export async function apply(ctx, rawConfig) {
 
     /** Best-effort, never throws: a notice must not feed back into the bridge. */
     const notify = (event, reason) => {
-      if (!config.notifyConnection) return;
+      if (!config.notifyConnection) {
+        noteDiagnostic({ kind: 'notice-skipped', why: 'notifyConnection off' });
+        return;
+      }
       const openId = noticeTarget(operators);
       if (!openId) {
+        // Not a failure — but it is invisible unless recorded, and "no notice
+        // arrived" is otherwise indistinguishable from "the notice was never
+        // attempted". The first start after a fresh install has no one to tell.
+        noteDiagnostic({ kind: 'notice-skipped', why: 'no operator known yet', event });
         logger.debug?.('[feishu] no operator to notify yet');
         return;
       }
       if (shouldSuppress(lastNoticeAt, Date.now(), event)) {
+        noteDiagnostic({ kind: 'notice-skipped', why: 'suppressed', event });
         logger.debug?.('[feishu] connection notice suppressed as flapping');
         return;
       }
       lastNoticeAt = Date.now();
-      void sendConnectionNotice({ api, logger }, { openId, event, reason });
+      noteDiagnostic({ kind: 'notice-sent', event, to: openId });
+      void sendConnectionNotice({ api, logger }, { openId, event, reason })
+        .then((ok) => noteDiagnostic({ kind: ok ? 'notice-delivered' : 'notice-failed', event }))
+        .catch(() => noteDiagnostic({ kind: 'notice-failed', event }));
     };
 
     let bridge = null;
@@ -861,7 +872,11 @@ export async function apply(ctx, rawConfig) {
     exitNoticeSent = true;
     const current = runtime;
     const openId = noticeTarget(operators);
-    if (!current || !openId || !config.notifyConnection) return;
+    if (!current || !openId || !config.notifyConnection) {
+      noteDiagnostic({ kind: 'exit-notice-skipped', hasRuntime: Boolean(current), hasOperator: Boolean(openId) });
+      return;
+    }
+    noteDiagnostic({ kind: 'exit-notice-sent', to: openId, reason });
     void sendConnectionNotice(
       { api: current.api, logger },
       { openId, event: 'disconnected', reason },
