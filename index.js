@@ -185,6 +185,11 @@ export async function apply(ctx, rawConfig) {
       botInfo = await api.botInfo();
       bridge.updateHealth({ bot: 'ok' });
     } catch (error) {
+      try {
+        await ws.dispose();
+      } catch {
+        // Nothing was opened yet, so there is nothing to close.
+      }
       shutdown();
       lastError = `凭据校验失败：${error?.message ?? error}`;
       throw new Error(lastError, { cause: error });
@@ -194,6 +199,14 @@ export async function apply(ctx, rawConfig) {
       await ws.start();
       bridge.updateHealth({ ws: WS_STATE.CONNECTED });
     } catch (error) {
+      // `start()` schedules a reconnect before it throws, so the socket must be
+      // disposed too: otherwise every failed attempt leaves a timer that retries
+      // forever in the background, and a failure looks like a half-open bridge.
+      try {
+        await ws.dispose();
+      } catch {
+        // A socket that never opened needs no further cleanup.
+      }
       shutdown();
       lastError = `长连接建立失败：${error?.message ?? error}。`
         + '请确认应用已发布、机器人能力已开启，事件订阅与回调订阅都设置为“使用长连接接收”。';
@@ -558,7 +571,7 @@ export async function apply(ctx, rawConfig) {
     });
     registration = session;
     session.completed.then(async (result) => {
-      const stored = await writeStoredSecret(ctx, result.appId, result.appSecret);
+      const stored = await writeStoredSecret(ctx, result.appId, result.appSecret, logger);
       await saveConfig({ appId: result.appId, enabled: true, brand: result.brand });
       if (!stored) {
         logger.warn?.('[feishu] the credential store refused the app secret; it must be entered again after a restart');
@@ -594,7 +607,7 @@ export async function apply(ctx, rawConfig) {
       // not accept a credential pair it never proved usable.
       const probe = new FeishuApi({ appId, appSecret, brand, logger });
       const info = await probe.botInfo();
-      await writeStoredSecret(ctx, appId, appSecret);
+      await writeStoredSecret(ctx, appId, appSecret, logger);
       await saveConfig({ appId, enabled: true, brand });
       await startRuntime({ appId, appSecret, brand });
       botInfo = info;
@@ -681,27 +694,42 @@ export async function apply(ctx, rawConfig) {
 async function readStoredSecret(ctx, appId) {
   const credentials = ctx.get?.('credentials');
   if (!credentials?.readRecord || !appId) return null;
-  // The colon form is what earlier versions wrote. Reading it costs one lookup
-  // and means an existing installation does not have to re-enter its secret.
-  for (const key of [credentialKey(appId), `dsh-feishu-only:${appId}`]) {
+  // Read the canonical key first, then the legacy colon form an earlier version
+  // wrote, so an existing installation keeps its secret.
+  //
+  // The legacy key is not screened by `isValidCredentialKey` on purpose: it is
+  // invalid by construction, and a store that still holds it will throw when it
+  // is asked — which is caught below. Screening it away would only lose the one
+  // case this fallback exists for.
+  const candidates = [credentialKey(appId), `dsh-feishu-only:${appId}`];
+  for (const key of candidates) {
     try {
       const record = await credentials.readRecord(key);
       if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key) return record.key;
       if (record?.kind === 'grant' && typeof record.payload?.secret === 'string') return record.payload.secret;
     } catch {
-      // A missing record, or a store that cannot answer, means no stored secret.
+      // A missing record, an invalid key, or a store that cannot answer all mean
+      // "no stored secret"; the caller falls back to asking the user.
     }
   }
   return null;
 }
 
-async function writeStoredSecret(ctx, appId, secret) {
+async function writeStoredSecret(ctx, appId, secret, logger = console) {
   const credentials = ctx.get?.('credentials');
   if (!credentials?.modifyRecord || !appId || !secret) return false;
+  const key = credentialKey(appId);
+  // A key the store would reject must never reach it: one bad key stops the
+  // whole credential file from loading, and the app with it.
+  if (!isValidCredentialKey(key)) {
+    logger.warn?.(`[feishu] refusing to store a secret under an invalid credential key: ${key}`);
+    return false;
+  }
   try {
-    await credentials.modifyRecord(credentialKey(appId), async () => ({ kind: 'api-key', key: secret }));
+    await credentials.modifyRecord(key, async () => ({ kind: 'api-key', key: secret }));
     return true;
-  } catch {
+  } catch (error) {
+    logger.warn?.(`[feishu] could not store the secret: ${error?.message ?? error}`);
     return false;
   }
 }
@@ -709,15 +737,31 @@ async function writeStoredSecret(ctx, appId, secret) {
 /**
  * The credential-store key for one app's secret.
  *
- * The separator is `/`, not `:`. A colon in a YAML mapping key is only a key
- * when the writer quotes it, and an unquoted `a:b:` line parses as a nested map
- * under `a` — so storing a secret under `dsh-feishu-only:cli_xxx` corrupted the
- * credential file's shape and the app could no longer read it back. The `/`
- * form matches the records this store already holds
- * (`client-connection/browser-session`).
+ * The store validates every record key as exactly `<scope>/<id>`:
+ *
+ *     function parseCredentialKey(value) {
+ *       const segments = value.split("/");
+ *       if (segments.length !== 2) throw new TypeError(...)
+ *     }
+ *
+ * and it runs that over **every** key when the file loads. A key in any other
+ * shape — notably the `dsh-feishu-only:cli_xxx` form an earlier version wrote —
+ * makes the whole credential store fail to load, which is what stopped the app
+ * from starting. The id segment must also be free of `/`, or the key would gain
+ * a third segment and be rejected for the same reason.
  */
 function credentialKey(appId) {
-  return `dsh-feishu-only/${appId}`;
+  const scope = 'dsh-feishu-only';
+  // A slash in the id would produce three segments and fail validation, so it
+  // is replaced rather than silently corrupting the store.
+  const id = String(appId ?? '').replace(/[/\\]+/gu, '_');
+  return `${scope}/${id}`;
+}
+
+/** Whether a key satisfies the store's `<scope>/<id>` rule. */
+function isValidCredentialKey(key) {
+  const segments = String(key ?? '').split('/');
+  return segments.length === 2 && segments[0] !== '' && segments[1] !== '';
 }
 
 /** Show only enough of an identifier to recognize it. */
