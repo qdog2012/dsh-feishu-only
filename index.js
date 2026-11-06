@@ -304,6 +304,9 @@ export async function apply(ctx, rawConfig) {
   /** Whether an attempt is still waiting for the user, so `start` is a no-op. */
   function isRegistrationLive() {
     if (!registration) return false;
+    // A failed or cancelled attempt must never block the next one: only an
+    // attempt that is genuinely still waiting for the user is live.
+    if (registration.outcome.status === 'failed') return false;
     return registration.state === REGISTRATION_STATE.STARTING
       || registration.state === REGISTRATION_STATE.WAITING
       || registration.state === REGISTRATION_STATE.SLOW_DOWN;

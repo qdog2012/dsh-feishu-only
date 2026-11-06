@@ -1,0 +1,10 @@
+fix: let a failed onboarding attempt be retried
+
+A registration attempt that ended in failure still reported a live state, so
+`?start=1` treated it as in-progress and returned the dead attempt instead of
+starting a new one. Only an attempt genuinely waiting for the user should block
+a restart.
+
+Also key the start/cancel/connect signals off query flags rather than methods:
+the webserver's `resource` route contract answers GET/HEAD only, so a POST
+start was rejected with 405 before the handler ever ran.
