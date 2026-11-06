@@ -51,10 +51,16 @@ export async function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig);
   const logger = ctx.logger ?? console;
 
+  // A field this plugin cannot understand must disable the bridge, not the
+  // app. Throwing here aborted `apply`, which took the whole Harness down on a
+  // launch — a plugin may never be able to do that. The problem is reported
+  // through the logger and `/status` instead, and the settings page still
+  // loads so the value can be corrected.
   if (config.problems.length > 0) {
-    // A row whose config cannot be understood must not boot half-configured:
-    // say exactly which field is wrong.
-    throw new TypeError(`dsh-feishu-only 配置无效：${config.problems.join('；')}`);
+    const summary = `dsh-feishu-only 配置无效：${config.problems.join('；')}`;
+    logger.warn?.(`[feishu] ${summary}`);
+    config.enabled = false;
+    config.problems = Object.freeze([...config.problems]);
   }
 
   const state = new InteractionState({ logger });
@@ -229,11 +235,20 @@ export async function apply(ctx, rawConfig) {
   // -------------------------------------------------------------- bootstrapping
 
   if (config.enabled) {
-    const secret = config.appSecret || await readStoredSecret(ctx, config.appId);
-    if (!config.appId || !secret) {
-      logger.warn?.('[feishu] the bridge is enabled but has no App ID/Secret; open the settings page to connect a bot');
-    } else {
-      await startRuntime({ appId: config.appId, appSecret: secret, brand: config.brand });
+    // Connecting at startup is a convenience, never a precondition: a bad
+    // secret, an unreachable platform or a failed socket must leave the app
+    // running with the settings page still usable. Letting this throw aborted
+    // `apply` and took the whole Harness down with it.
+    try {
+      const secret = config.appSecret || await readStoredSecret(ctx, config.appId);
+      if (!config.appId || !secret) {
+        logger.warn?.('[feishu] the bridge is enabled but has no App ID/Secret; open the settings page to connect a bot');
+      } else {
+        await startRuntime({ appId: config.appId, appSecret: secret, brand: config.brand });
+      }
+    } catch (error) {
+      lastError = lastError ?? `启动连接失败：${error?.message ?? error}`;
+      logger.warn?.(`[feishu] startup connect failed (the plugin stays loaded): ${error?.message ?? error}`);
     }
   }
 
@@ -422,6 +437,8 @@ export async function apply(ctx, rawConfig) {
         messages: runtime ? runtime.ws.state : WS_STATE.STOPPED,
       },
       lastError,
+      /** Configuration fields this plugin could not understand, if any. */
+      configProblems: [...config.problems],
       capabilities: harness.available,
       registration: registrationSnapshot(),
       recent: [...diagnostics],

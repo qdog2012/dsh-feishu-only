@@ -357,6 +357,38 @@ test('an empty inbound frame is ignored rather than decoded', async (t) => {
   assert.equal(api.cards.length, 0);
 });
 
+test('a socket that never opens fails instead of hanging forever', async (t) => {
+  // `start()` is awaited during `apply`, so an `open` event that never arrives
+  // would hang the whole app on launch rather than reporting a failure.
+  const conn = new FeishuLongConnection({
+    appId: 'cli_x',
+    appSecret: 's',
+    logger: silent,
+    WebSocketImpl: class {
+      static OPEN = 1;
+      static CONNECTING = 0;
+      readyState = 0;
+      binaryType = 'blob';
+      addEventListener() {
+        // Deliberately never fires `open`, `error` or `close`.
+      }
+      close() {}
+      send() {}
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { URL: 'wss://example.invalid/?service_id=1' } }),
+    }),
+  });
+  conn.setConnectTimeout?.(120);
+  t.after(() => conn.dispose());
+
+  const started = Date.now();
+  await assert.rejects(() => conn.start(), /did not open|websocket/i);
+  assert.ok(Date.now() - started < 5_000, 'it gave up rather than hanging');
+});
+
 test('a malformed frame does not crash the connection', async (t) => {
   const { socket, api, settle } = await wire(t);
   socket.deliver(new Uint8Array([0xff, 0xff, 0xff]));
