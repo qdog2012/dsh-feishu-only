@@ -606,3 +606,52 @@ test('a confirmation dialog uses plain_text objects on both fields', () => {
     assert.equal(typeof button.confirm.text.content, 'string');
   }
 });
+test('a settings list puts each option in its own button', () => {
+  // Model, permission and reasoning lists share this card; it used to print a
+  // numbered list and then duplicate every option as a button.
+  const payload = settingsCard({
+    kind: 'model',
+    title: '模型',
+    current: 'p/m',
+    options: [
+      { label: 'deepseek-chat', selected: true },
+      { label: 'deepseek-reasoner' },
+      { label: '一个名字特别特别长的模型用来验证按钮文字会不会被内联截断而不是换行显示出来导致排版错乱的情况' },
+    ],
+    note: '切换后从下一轮生效',
+  });
+  const select = buttonsOf(payload).filter((b) => b.behaviors[0].value.id === 'settings.select');
+  assert.equal(select.length, 3, 'one button per option');
+  assert.deepEqual(select.map((b) => b.behaviors[0].value.index), [1, 2, 3]);
+  assert.match(select[0].text.content, /^1\. deepseek-chat/u);
+  assert.ok(select[0].text.content.includes('✅'), 'the current option is marked');
+  assert.equal(select[0].type, 'primary', 'and is the primary button');
+
+  // Each option is its own row.
+  const rows = payload.body.elements.filter((el) => el.tag === 'column_set');
+  const optionRows = rows.filter((r) => r.columns[0]?.elements[0]?.behaviors?.[0]?.value?.id === 'settings.select');
+  assert.equal(optionRows.length, 3);
+  for (const row of optionRows) assert.equal(row.columns.length, 1, 'never paired');
+
+  // The label is clamped inline: a button has no second line, so the
+  // multi-line truncation notice `clampText` appends would leak into the label.
+  const longLabel = select[2].text.content;
+  assert.ok(longLabel.length <= 62, `a long label is bounded (was ${longLabel.length})`);
+});
+
+test('a settings list does not repeat its options as body text', () => {
+  const payload = settingsCard({
+    kind: 'reasoning',
+    title: '推理强度',
+    current: 'high',
+    options: [{ label: 'high', selected: true }, { label: 'low' }],
+    note: 'n',
+  });
+  const text = JSON.stringify(payload);
+  const count = (needle) => text.split(needle).length - 1;
+  // "当前：high" is the current value, which belongs on the card. What must not
+  // happen is a numbered body list duplicating every option as well.
+  assert.equal(count('high'), 2, 'the current value plus its button, no third copy');
+  assert.equal(count('low'), 1, 'an unselected option appears only as a button');
+  assert.ok(!count('**1.'), 'no numbered body list');
+});
