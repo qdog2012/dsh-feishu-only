@@ -236,21 +236,27 @@ export async function apply(ctx, rawConfig) {
   // -------------------------------------------------------------- bootstrapping
 
   if (config.enabled) {
-    // Connecting at startup is a convenience, never a precondition: a bad
-    // secret, an unreachable platform or a failed socket must leave the app
-    // running with the settings page still usable. Letting this throw aborted
-    // `apply` and took the whole Harness down with it.
-    try {
-      const secret = config.appSecret || await readStoredSecret(ctx, config.appId);
-      if (!config.appId || !secret) {
-        logger.warn?.('[feishu] the bridge is enabled but has no App ID/Secret; open the settings page to connect a bot');
-      } else {
-        await startRuntime({ appId: config.appId, appSecret: secret, brand: config.brand });
+    // Connecting is started, never awaited.
+    //
+    // Awaiting it here made plugin loading depend on a network round trip and a
+    // socket handshake: the app showed no UI until Feishu answered, which reads
+    // as "the app will not start". The bridge is not a precondition for the
+    // rest of the app, so the attempt runs in the background and reports its
+    // outcome through `/status` like any other connection.
+    const startupConfig = { appId: config.appId, brand: config.brand };
+    void (async () => {
+      try {
+        const secret = config.appSecret || await readStoredSecret(ctx, startupConfig.appId);
+        if (!startupConfig.appId || !secret) {
+          logger.warn?.('[feishu] the bridge is enabled but has no App ID/Secret; open the settings page to connect a bot');
+          return;
+        }
+        await startRuntime({ appId: startupConfig.appId, appSecret: secret, brand: startupConfig.brand });
+      } catch (error) {
+        lastError = lastError ?? `启动连接失败：${error?.message ?? error}`;
+        logger.warn?.(`[feishu] startup connect failed (the plugin stays loaded): ${error?.message ?? error}`);
       }
-    } catch (error) {
-      lastError = lastError ?? `启动连接失败：${error?.message ?? error}`;
-      logger.warn?.(`[feishu] startup connect failed (the plugin stays loaded): ${error?.message ?? error}`);
-    }
+    })();
   }
 
   // -------------------------------------------------------------- HTTP surface
@@ -657,12 +663,16 @@ export async function apply(ctx, rawConfig) {
 async function readStoredSecret(ctx, appId) {
   const credentials = ctx.get?.('credentials');
   if (!credentials?.readRecord || !appId) return null;
-  try {
-    const record = await credentials.readRecord(credentialKey(appId));
-    if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key) return record.key;
-    if (record?.kind === 'grant' && typeof record.payload?.secret === 'string') return record.payload.secret;
-  } catch {
-    // A missing credential store simply means no stored secret.
+  // The colon form is what earlier versions wrote. Reading it costs one lookup
+  // and means an existing installation does not have to re-enter its secret.
+  for (const key of [credentialKey(appId), `dsh-feishu-only:${appId}`]) {
+    try {
+      const record = await credentials.readRecord(key);
+      if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key) return record.key;
+      if (record?.kind === 'grant' && typeof record.payload?.secret === 'string') return record.payload.secret;
+    } catch {
+      // A missing record, or a store that cannot answer, means no stored secret.
+    }
   }
   return null;
 }
@@ -678,8 +688,18 @@ async function writeStoredSecret(ctx, appId, secret) {
   }
 }
 
+/**
+ * The credential-store key for one app's secret.
+ *
+ * The separator is `/`, not `:`. A colon in a YAML mapping key is only a key
+ * when the writer quotes it, and an unquoted `a:b:` line parses as a nested map
+ * under `a` — so storing a secret under `dsh-feishu-only:cli_xxx` corrupted the
+ * credential file's shape and the app could no longer read it back. The `/`
+ * form matches the records this store already holds
+ * (`client-connection/browser-session`).
+ */
 function credentialKey(appId) {
-  return `dsh-feishu-only:${appId}`;
+  return `dsh-feishu-only/${appId}`;
 }
 
 /** Show only enough of an identifier to recognize it. */

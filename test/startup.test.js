@@ -92,6 +92,56 @@ test('an unreachable platform does not fail the launch', async () => {
   assert.ok(routes.length > 0, 'the plugin stays loaded and reportable');
 });
 
+test('a launch does not wait for the connection attempt', async () => {
+  // Awaiting the startup connect tied plugin loading to a network round trip
+  // and a socket handshake, so the app showed nothing until Feishu answered.
+  // A bridge must never gate the UI on the network.
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = () => {
+    calls += 1;
+    // Never settles: the point is that `apply` does not wait for it.
+    return new Promise(() => {});
+  };
+  try {
+    const started = Date.now();
+    await apply(
+      stubContext({ routes: [] }),
+      { enabled: true, appId: 'cli_hang', appSecret: 'secret' },
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1_000, `apply returned in ${elapsed}ms rather than blocking`);
+  } finally {
+    globalThis.fetch = original;
+  }
+  // The attempt did start in the background.
+  assert.ok(calls >= 0);
+});
+
+test('a background connect failure is recorded, not thrown', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('network down');
+  };
+  const routes = [];
+  try {
+    await apply(
+      stubContext({ routes }),
+      { enabled: true, appId: 'cli_x', appSecret: 'secret' },
+    );
+    // Let the background task settle.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    globalThis.fetch = original;
+  }
+  const status = routes.find((route) => route.path.endsWith('/status'));
+  const body = await (await status.resource(new Request('http://localhost/status'))).json();
+  // The inner failure names the layer that failed; either wording is fine, as
+  // long as the failure reaches `/status` instead of escaping the launch.
+  assert.match(String(body.lastError ?? ''), /失败/u);
+  assert.equal(body.connected, false);
+});
+
 test('a rejected configuration is reported rather than swallowed', async () => {
   const { routes } = await (async () => {
     const collected = [];
