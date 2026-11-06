@@ -206,6 +206,41 @@ test('rounds without any visible turn are dropped', () => {
   assert.deepEqual(rounds, []);
 });
 
+test('history keeps the request and the final reply, not the process', () => {
+  // Tool calls and intermediate assistant messages are how the round was
+  // produced; `/history` is for reading what was said.
+  const rounds = groupRounds([
+    { type: 'turn/start', seq: 1, time: 1000, data: { turn: 1 } },
+    {
+      type: 'user/message',
+      seq: 2,
+      data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '需求' }] } },
+    },
+    assistant(3, '中间步骤一'),
+    { type: 'tool/call', seq: 4, data: { name: 'bash' } },
+    assistant(5, '中间步骤二'),
+    { type: 'tool/call', seq: 6, data: { name: 'read' } },
+    assistant(7, '最终答复'),
+    { type: 'turn/end', seq: 8, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]);
+  assert.equal(rounds.length, 1);
+  assert.deepEqual(rounds[0].turns.map((turn) => turn.role), ['user', 'assistant']);
+  assert.equal(rounds[0].turns.at(-1).text, '最终答复', 'only the last assistant message survives');
+  assert.ok(
+    !JSON.stringify(rounds).includes('bash'),
+    'tool calls are not carried into history at all',
+  );
+});
+
+test('a round that only made tool calls is dropped', () => {
+  const rounds = groupRounds([
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    { type: 'tool/call', seq: 2, data: { name: 'bash' } },
+    { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]);
+  assert.deepEqual(rounds, [], 'nothing was said, so there is nothing to show');
+});
+
 test('visible text is joined and reasoning is excluded', () => {
   const content = [
     { type: 'reasoning', text: '内部推理' },

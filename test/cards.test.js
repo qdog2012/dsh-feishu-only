@@ -119,6 +119,41 @@ test('a task is selected by its own title, not by a separate index list', () => 
   assert.ok(!text.includes('选择 2'));
 });
 
+test('history shows the final reply and omits tool calls', () => {
+  // The card also guards itself: an older payload may still carry tool turns,
+  // and they must not appear.
+  const payload = historyCard({
+    task: { title: 't' },
+    rounds: [{
+      time: '10:00',
+      status: '已完成',
+      turns: [
+        { role: 'user', text: '帮我重构' },
+        { role: 'tool', text: '调用 bash' },
+        { role: 'assistant', text: '中间步骤' },
+        { role: 'assistant', text: '最终答复' },
+      ],
+    }],
+    page: 1, totalPages: 1, pageKey: 'k',
+  });
+  const text = JSON.stringify(payload);
+  assert.ok(text.includes('帮我重构'), 'the request is shown');
+  assert.ok(text.includes('最终答复'), 'the final reply is shown');
+  assert.ok(!text.includes('调用 bash'), 'tool calls are hidden');
+  assert.ok(!text.includes('🔧'), 'no tool marker remains');
+});
+
+test('a round with no reply says so instead of showing nothing', () => {
+  const payload = historyCard({
+    task: { title: 't' },
+    rounds: [{ time: '10:00', status: '执行失败', turns: [{ role: 'user', text: '需求' }] }],
+    page: 1, totalPages: 1, pageKey: 'k',
+  });
+  const text = JSON.stringify(payload);
+  assert.ok(text.includes('没有最终回复'), 'an empty answer is explained');
+  assert.ok(text.includes('执行失败'), 'and the reason is named');
+});
+
 test('history is paginated ten rounds at a time', () => {
   // The bridge slices by `PAGE_SIZE.history` and the card numbers the rows; if
   // they disagree every page after the first is misnumbered.
