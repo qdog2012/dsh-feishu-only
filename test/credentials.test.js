@@ -177,14 +177,16 @@ test('a Feishu app id with underscores never reaches the key', async () => {
 test('the app id is stored verbatim in the value', async () => {
   const ctx = await connectWith('cli_aa605ec29f395ccf', 'the-secret');
   const record = [...ctx.store.values()][0];
-  assert.equal(record.appId, 'cli_aa605ec29f395ccf', 'the id round-trips exactly');
-  assert.equal(record.key, 'the-secret');
+  // A grant record: the api-key field whitelist would reject the extra field.
+  assert.equal(record.kind, 'grant');
+  assert.equal(record.payload.appId, 'cli_aa605ec29f395ccf', 'the id round-trips exactly');
+  assert.equal(record.payload.secret, 'the-secret');
 });
 
 test('a record is only used for the app it names', async () => {
   // Two apps share one slot, so the value has to say which one it belongs to.
   const store = new Map([
-    ['dsh-feishu-only/app', { kind: 'api-key', key: 'SECRET-A', appId: 'cli_a' }],
+    ['dsh-feishu-only/app', { kind: 'grant', payload: { appId: 'cli_a', secret: 'SECRET-A' } }],
   ]);
   const routes = [];
   const ctx = stubContext({ routes, store });

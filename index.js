@@ -736,12 +736,11 @@ async function writeStoredSecret(ctx, appId, secret, logger = console) {
   const credentials = ctx.get?.('credentials');
   if (!credentials?.modifyRecord || !appId || !secret) return false;
   try {
-    // The app id travels in the value, so the key is a constant that cannot be
-    // rejected and cannot lose information.
+    // A grant record: its payload is arbitrary JSON, so it carries the app id
+    // alongside the secret without tripping the api-key field whitelist.
     await credentials.modifyRecord(CREDENTIAL_KEY, async () => ({
-      kind: 'api-key',
-      key: secret,
-      appId,
+      kind: 'grant',
+      payload: { appId, secret },
     }));
     return true;
   } catch (error) {
@@ -755,33 +754,42 @@ async function writeStoredSecret(ctx, appId, secret, logger = console) {
  *
  * One fixed key, with the app id stored **in the value**.
  *
- * The store constrains keys hard — exactly two segments, each matching
- * `/^[a-z][a-z0-9-]*$/`, validated over the whole file when it loads — and a
- * single violation stops the app from starting. Feishu app ids look like
- * `cli_aa605ec29f395ccf`, whose underscore is legal to Feishu and illegal here,
- * so putting the id in the key means mapping it into that alphabet. That mapping
- * is lossy: `cli_a` and `cli-a` would become the same record.
+ * Two store rules make key-based addressing a trap, and both are enforced over
+ * the whole file when it loads:
  *
- * Keeping the id in the value removes the problem instead of working around it.
- * `dsh-feishu-only/app` is fixed and always valid, the id is stored verbatim and
- * round-trips exactly, and a future key-format change cannot orphan the secret.
+ * - a key must be exactly two segments, each matching `/^[a-z][a-z0-9-]*$/` —
+ *   a Feishu id like `cli_aa605ec29f395ccf` fails the underscore rule;
+ * - an `api-key` record accepts only `kind`, `key` and `env`, and an unknown
+ *   field is an error, not a warning.
+ *
+ * So the key is the constant `dsh-feishu-only/app` (always valid), and the
+ * record is a **grant**: its `payload` is arbitrary JSON, which is where the app
+ * id and the secret live. An `api-key` record cannot carry the app id without
+ * failing the second rule.
  */
 const CREDENTIAL_KEY = 'dsh-feishu-only/app';
 
-/** Shape of the stored value: the secret for one app id. */
+/**
+ * Read one bridge record, whichever shape it was written in.
+ *
+ * @returns {{appId: string|null, secret: string}|null}
+ */
 function readBridgeRecord(record) {
   if (!record || typeof record !== 'object') return null;
-  if (record.kind === 'api-key' && typeof record.key === 'string') {
-    // `appId` is what the record belongs to. A record written before the id was
-    // stored has no `appId`; it is accepted for any app so an upgrade does not
-    // invalidate an existing secret.
-    return { appId: typeof record.appId === 'string' ? record.appId : null, secret: record.key };
+  // The current shape: a grant payload.
+  if (record.kind === 'grant') {
+    const payload = record.payload;
+    if (payload && typeof payload === 'object' && typeof payload.secret === 'string') {
+      return {
+        appId: typeof payload.appId === 'string' ? payload.appId : null,
+        secret: payload.secret,
+      };
+    }
+    return null;
   }
-  if (record.kind === 'grant' && typeof record.payload?.secret === 'string') {
-    return {
-      appId: typeof record.payload.appId === 'string' ? record.payload.appId : null,
-      secret: record.payload.secret,
-    };
+  // Written by earlier versions, before the app id moved into the value.
+  if (record.kind === 'api-key' && typeof record.key === 'string') {
+    return { appId: null, secret: record.key };
   }
   return null;
 }
