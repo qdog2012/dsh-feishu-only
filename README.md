@@ -137,7 +137,7 @@ record rather than in plain text.
 ## Development
 
 ```bash
-npm test     # 175 tests, node:test only
+npm test     # 182 tests, node:test only
 npm run check
 ```
 
