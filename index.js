@@ -267,15 +267,13 @@ export async function apply(ctx, rawConfig) {
   // -------------------------------------------------------------- bootstrapping
 
   if (config.enabled) {
-    // Connecting is started, never awaited.
-    //
-    // Awaiting it here made plugin loading depend on a network round trip and a
-    // socket handshake: the app showed no UI until Feishu answered, which reads
-    // as "the app will not start". The bridge is not a precondition for the
-    // rest of the app, so the attempt runs in the background and reports its
-    // outcome through `/status` like any other connection.
+    // Connecting is started, never awaited: awaiting it made plugin loading
+    // depend on a network round trip and a socket handshake, so the app showed
+    // no UI until Feishu answered. The bridge is not a precondition for the rest
+    // of the app, so the attempt runs in the background and reports its outcome
+    // through `/status` like any other connection.
     const startupConfig = { appId: config.appId, brand: config.brand };
-    void (async () => {
+    const attemptStartup = async () => {
       try {
         const inline = Boolean(config.appSecret);
         const secret = config.appSecret || await readStoredSecret(ctx, startupConfig.appId);
@@ -300,7 +298,21 @@ export async function apply(ctx, rawConfig) {
         });
         logger.warn?.(`[feishu] startup connect failed (the plugin stays loaded): ${error?.message ?? error}`);
       }
-    })();
+    };
+
+    // A cold start runs this plugin's `apply` before the credentials service has
+    // activated, so a one-shot `ctx.get` finds nothing, the secret reads as
+    // absent, and the bridge never connects — even though the record is on disk
+    // and the service is up a moment later. `ctx.inject` waits for it (and runs
+    // again if it is ever replaced), the same fix the HTTP routes needed for
+    // `webServer`.
+    if (config.appSecret) {
+      // The secret is inline, so no service is needed and nothing is gained by
+      // waiting for one.
+      void attemptStartup();
+    } else {
+      ctx.inject(['credentials'], attemptStartup);
+    }
   }
 
   // -------------------------------------------------------------- HTTP surface

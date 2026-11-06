@@ -60,6 +60,93 @@ const brokenCredentials = {
   },
 };
 
+test('a cold start waits for the credentials service before reading the secret', async () => {
+  // The race, reproduced: on a cold start the credentials service activates
+  // AFTER this plugin's `apply`, so a one-shot `ctx.get` finds nothing, the
+  // secret reads as absent, and the bridge never connects — even though the
+  // record is on disk and the service is up a moment later. The startup attempt
+  // must therefore wait for the service instead of reading once.
+  let ready = false;
+  const store = new Map([
+    ['dsh-feishu-only/app', { kind: 'grant', payload: { appId: 'cli_x', secret: 'S' } }],
+  ]);
+  const credentials = {
+    async readRecord(key) {
+      if (!ready) return undefined;
+      return store.get(key) ?? null;
+    },
+    async modifyRecord() {},
+  };
+  const routes = [];
+  const waiting = [];
+  const ctx = {
+    logger: silent,
+    get(name) {
+      if (name === 'webServer') return { register: (r) => { routes.push(r); return () => {}; } };
+      if (name === 'credentials') return ready ? credentials : undefined;
+      return undefined;
+    },
+    inject(names, callback) {
+      const list = Array.isArray(names) ? names : [names];
+      if (list.includes('webServer')) {
+        callback({ webServer: ctx.get('webServer') });
+        return () => {};
+      }
+      if (list.includes('credentials')) {
+        // Model the cold start: the service is not there yet, so the callback
+        // is parked until it activates.
+        waiting.push(callback);
+        return () => {};
+      }
+      return () => {};
+    },
+    effect() {
+      return () => {};
+    },
+    on() {
+      return () => {};
+    },
+    fiber: { entry: null },
+  };
+
+  await apply(ctx, { enabled: true, appId: 'cli_x', brand: 'feishu' });
+  assert.ok(waiting.length > 0, 'the startup attempt is registered as waiting for the service');
+
+  // The service activates and the parked callback runs: the secret must now be
+  // read, which this detects through the platform call the connect attempt
+  // makes with that secret.
+  const original = globalThis.fetch;
+  let usedSecret = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('tenant_access_token')) usedSecret = String(init?.body ?? '');
+    return {
+      ok: false,
+      status: 400,
+      headers: new Map([['content-type', 'application/json']]),
+      async json() {
+        return { code: 10014, msg: 'app secret invalid' };
+      },
+      async text() {
+        return '{}';
+      },
+    };
+  };
+  try {
+    ready = true;
+    for (const callback of waiting) await callback();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  // The secret was read from the store and handed to the platform, rather than
+  // the bridge deciding at apply-time that no secret exists.
+  assert.ok(
+    usedSecret !== null && usedSecret.includes('S'),
+    'the stored secret was read after the service activated',
+  );
+});
+
 test('a config the plugin cannot understand does not fail the launch', async () => {
   // `brand: 'zzz'` is invalid. Previously this threw a TypeError out of
   // `apply`, which aborted plugin loading and therefore app startup.
