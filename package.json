@@ -1,0 +1,44 @@
+{
+  "name": "dsh-feishu-only",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Feishu (Lark) bot integration for DeepSeek Harness: scan-to-create onboarding, 16 slash commands, task cards, live progress, approvals, questions, previews.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "feishu",
+    "lark",
+    "bot",
+    "im"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "check": "node scripts/check-syntax.mjs"
+  }
+}

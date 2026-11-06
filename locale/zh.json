@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "title": "飞书机器人接入",
+    "description": "在飞书中驱动 DeepSeek Harness 会话：扫码创建机器人、任务列表、实时进度卡片、审批与问答、文件预览。"
+  },
+  "help": {
+    "title": "飞书机器人接入",
+    "summary": "把飞书聊天变成 DeepSeek Harness 的操作面板。"
+  }
+}

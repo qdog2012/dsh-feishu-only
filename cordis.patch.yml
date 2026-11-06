@@ -1,0 +1,7 @@
+# dsh-feishu-only bundle: one Host plugin row that owns the Feishu integration.
+# Configure it from the plugin row's config (Plugin Manager / Settings) or by
+# overriding this row's `config` in the profile's cordis.patch.yml.
+- insert:
+    - id: dsh-feishu-only
+      name: dsh-feishu-only
+      config: {}

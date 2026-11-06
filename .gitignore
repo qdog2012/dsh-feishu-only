@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local scratch: downloaded SDK reference material and ad-hoc probe scripts.
+.ref/
+*.tgz

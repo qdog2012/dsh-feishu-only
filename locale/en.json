@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "title": "Feishu bot bridge",
+    "description": "Drives DeepSeek Harness sessions from Feishu: scan-to-create bot onboarding, task lists, live progress cards, approvals, questions and file previews."
+  },
+  "help": {
+    "title": "Feishu bot bridge",
+    "summary": "Turn a Feishu chat into a DeepSeek Harness control surface."
+  }
+}
