@@ -7,7 +7,10 @@ test('page sizes match the interaction reference', () => {
   assert.equal(PAGE_SIZE.task, 10);
   assert.equal(PAGE_SIZE.project, 10);
   assert.equal(PAGE_SIZE.search, 10);
-  assert.equal(PAGE_SIZE.history, 5);
+  // The reference suggests 5 rounds per history page but explicitly allows a
+  // different size; ten was chosen so every list pages identically.
+  assert.equal(PAGE_SIZE.history, 10);
+  assert.equal(PAGE_SIZE.settings, 10);
 });
 
 test('the current task is stored per user, so switching chats keeps the target', () => {

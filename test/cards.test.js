@@ -119,6 +119,57 @@ test('a task is selected by its own title, not by a separate index list', () => 
   assert.ok(!text.includes('选择 2'));
 });
 
+test('history is paginated ten rounds at a time', () => {
+  // The bridge slices by `PAGE_SIZE.history` and the card numbers the rows; if
+  // they disagree every page after the first is misnumbered.
+  const rounds = Array.from({ length: 10 }, (_, index) => ({
+    time: '00:00', status: '完成',
+    turns: [{ role: 'user', text: `u${index}` }],
+  }));
+  const payload = historyCard({
+    task: { title: 't' }, rounds, page: 2, totalPages: 3, pageKey: 'k',
+  });
+  const text = JSON.stringify(payload);
+  assert.ok(text.includes('每页 10 轮'), 'the card states the page size');
+  // Page 2 starts at round 11.
+  assert.ok(text.includes('第 11 轮'), 'numbering continues across pages');
+  assert.ok(text.includes('第 20 轮'));
+});
+
+test('the card page size matches the bridge page size', async () => {
+  const { PAGE_SIZE } = await import('../lib/state.js');
+  assert.equal(PAGE_SIZE.history, 10);
+  const payload = historyCard({
+    task: { title: 't' },
+    rounds: [{ time: '00:00', status: '完成', turns: [] }],
+    page: 1, totalPages: 1, pageKey: 'k',
+  });
+  assert.ok(JSON.stringify(payload).includes(`每页 ${PAGE_SIZE.history} 轮`));
+});
+
+test('each task occupies its own row', () => {
+  // A full-width button shows the whole title; sharing a row truncated most.
+  const payload = taskListCard({
+    currentTask: null,
+    tasks: [
+      { sessionId: 's1', title: '一' },
+      { sessionId: 's2', title: '二' },
+      { sessionId: 's3', title: '三' },
+    ],
+    page: 1,
+    totalPages: 1,
+    total: 3,
+    pageKey: 'k',
+  });
+  const rows = payload.body.elements.filter((element) => element.tag === 'column_set');
+  const selectRows = rows.filter((row) => row.columns.length === 1
+    && row.columns[0].elements[0]?.behaviors?.[0]?.value?.id === 'task.select');
+  assert.equal(selectRows.length, 3, 'one row per task');
+  for (const row of selectRows) {
+    assert.equal(row.columns.length, 1, 'a task button is never paired');
+  }
+});
+
 test('the current task is the primary button', () => {
   const payload = taskListCard({
     currentTask: null,
