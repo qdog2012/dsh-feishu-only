@@ -25,7 +25,7 @@ install into any profile with no peer packages to satisfy.
 | Results | The final answer is sent as its **own** message, deduplicated by event, so a truncated progress area can never lose it. |
 | Approvals | Separate card, private chat only, fail-closed. A delivery failure is a rejection, never a grant. |
 | Questions | Separate card with a real form; every question submits together, and free text wins over a selection. |
-| Previews | Web/Office/PDF/images/text render as screenshots. Download is a separate action, because a screenshot is not an uploaded file. |
+| Previews | Text and images render inline; Office and PDF are delivered as paged documents. Download is a separate action, because a preview is not an uploaded file. |
 
 ## Install
 
@@ -123,9 +123,12 @@ button in a private chat. If the private card cannot be delivered, or nobody can
 be reached, the request resolves to `rejected` (approvals) or stays pending for
 another answerer (questions). Sending a card is never treated as consent.
 
-**Retry policy.** Capacity-style errors are recognised explicitly
-(`isCapacityError`) so only Feishu-originated work is retried, always with a
-visible wait reason and an explicit cancel — not as a blanket retry.
+**Retry policy.** A model-capacity failure is retried only for a task this
+bridge started, through the `agent/request-error` waterfall. The interval is
+fixed (`capacityRetryMs`, default 10 s) with no attempt cap, every wait is
+published on the progress card with its attempt number, and a stop, a new round
+or a cleared goal ends the schedule. An observed foreign task is never granted
+retry authority by the act of being observed.
 
 **No hand-written profile edits.** The bridge persists its own configuration
 through the profile's `configEditor`, and stores the App Secret as a credential
@@ -134,7 +137,7 @@ record rather than in plain text.
 ## Development
 
 ```bash
-npm test     # 158 tests, node:test only
+npm test     # 175 tests, node:test only
 npm run check
 ```
 
@@ -169,8 +172,11 @@ lib/
   bridge does not restart the harness process from Feishu.
 - `/update` reports the installed version; upgrading happens through the plugin
   manager.
-- Web-page long screenshots need a browser capability registered in the profile;
-  without one, the bridge says so instead of producing a partial image.
+- Office and PDF previews are delivered as paged PDF documents rather than
+  raster screenshots, because this deployment offers no PDF rasterizer. The
+  bridge says which it is instead of labelling a first page as the whole file.
+- Web-page preview needs a browser capability registered in the profile; without
+  one, the bridge says so instead of producing a partial image.
 
 ## License
 

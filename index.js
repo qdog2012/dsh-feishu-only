@@ -87,6 +87,7 @@ export async function apply(ctx, rawConfig) {
       state,
       api,
       logger,
+      retryWaitMs: config.capacityRetryMs,
       taskLookup: (sessionId) => bridge?.knownTasks().find((task) => task.sessionId === sessionId) ?? null,
       operatorsFor: (sessionId) => bridge?.operatorsForTask(sessionId) ?? [],
       deliver: async (openId, payload) => api.sendPrivateCard(openId, payload),
@@ -195,22 +196,25 @@ export async function apply(ctx, rawConfig) {
 
   // -------------------------------------------------------------- HTTP surface
 
+  // The helpers live outside the registration block because the handlers they
+  // serve (`connectWithCredentials`, `verifyConnected`) are also called from
+  // elsewhere; scoping them to the block left them undefined at call time.
+  const base = '/plugins/dsh-feishu-only';
+  const json = (body, status = 200) => new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+
   const webServer = ctx.get?.('webServer');
   const routeDisposers = [];
   if (webServer?.register) {
-    const base = '/plugins/dsh-feishu-only';
-    const json = (body, status = 200) => new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-    });
-
     routeDisposers.push(webServer.register({
       kind: 'exact',
       path: `${base}/status`,
       resource: async () => json(buildStatus()),
     }));
 
-    reDisposers.push(webServer.register({
+    routeDisposers.push(webServer.register({
       kind: 'exact',
       path: `${base}/qr`,
       resource: async (request) => {

@@ -171,6 +171,35 @@ test('an Office document is converted through the host converter', async () => {
     const payload = JSON.stringify(api.cards.at(-1));
     assert.match(payload, /缺少字体/u, 'missing fonts are disclosed');
     assert.match(payload, /不修改原始文件/u);
+
+    // The conversion output is a PDF, so it must travel as a document upload —
+    // sending PDF bytes to the image endpoint would be rejected.
+    assert.equal(api.files.length, 1, 'the PDF is uploaded as a file');
+    assert.equal(api.files[0].fileType, 'pdf');
+    assert.match(api.files[0].name, /report\.docx\.pdf$/u);
+    assert.equal(api.fileSends.length, 1, 'and sent as its own message');
+  });
+});
+
+test('a PDF preview is delivered as a paged document, never a fake first page', async () => {
+  await withTempDir(async (directory) => {
+    const path = join(directory, 'manual.pdf');
+    await writeFile(path, Buffer.from('%PDF-1.4'));
+    const api = new RecordingApi();
+    const service = new PreviewService({
+      ctx: { get: () => undefined },
+      api,
+      harness: {},
+      config: {},
+      logger: silent,
+    });
+    await service.show({ chatId: 'oc_1', task: {}, path, downloadId: 'd1' });
+    assert.equal(api.files.length, 1, 'the PDF itself is uploaded');
+    assert.equal(api.files[0].fileType, 'pdf');
+    assert.equal(api.fileSends.length, 1);
+    const payload = JSON.stringify(api.cards.at(-1));
+    assert.match(payload, /全部页面/u, 'it claims all pages, which a document upload honours');
+    assert.ok(!payload.includes('封面预览'), 'a first-page image must not be presented as the document');
   });
 });
 
@@ -268,6 +297,7 @@ class RecordingApi {
   texts = [];
   images = [];
   files = [];
+  fileSends = [];
 
   async sendCard(chatId, payload) {
     this.cards.push(payload);
@@ -288,12 +318,13 @@ class RecordingApi {
     return 'img_key';
   }
 
-  async uploadFile(data, { name }) {
-    this.files.push({ data, name });
+  async uploadFile(data, { name, fileType }) {
+    this.files.push({ data, name, fileType });
     return 'file_key';
   }
 
-  async sendFile() {
+  async sendFile(chatId, key) {
+    this.fileSends.push({ chatId, key });
     return {};
   }
 
