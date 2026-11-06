@@ -694,39 +694,55 @@ export async function apply(ctx, rawConfig) {
 async function readStoredSecret(ctx, appId) {
   const credentials = ctx.get?.('credentials');
   if (!credentials?.readRecord || !appId) return null;
-  // Read the canonical key first, then the legacy colon form an earlier version
-  // wrote, so an existing installation keeps its secret.
-  //
-  // The legacy key is not screened by `isValidCredentialKey` on purpose: it is
-  // invalid by construction, and a store that still holds it will throw when it
-  // is asked — which is caught below. Screening it away would only lose the one
-  // case this fallback exists for.
-  const candidates = [credentialKey(appId), `dsh-feishu-only:${appId}`];
-  for (const key of candidates) {
+
+  // One fixed key holds the record. Keys written by earlier versions are still
+  // tried, because a secret the user already entered must not have to be
+  // entered again — and reading an invalid key only costs a caught throw.
+  const legacyKeys = [
+    `dsh-feishu-only/${legacyIdSegment(appId)}`,
+    `dsh-feishu-only:${appId}`,
+  ];
+  for (const key of [CREDENTIAL_KEY, ...legacyKeys]) {
     try {
-      const record = await credentials.readRecord(key);
-      if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key) return record.key;
-      if (record?.kind === 'grant' && typeof record.payload?.secret === 'string') return record.payload.secret;
+      const stored = readBridgeRecord(await credentials.readRecord(key));
+      if (!stored) continue;
+      // A record that names its app id is only used for that app; one that does
+      // not predates the field and is used for any app.
+      if (stored.appId !== null && stored.appId !== appId) continue;
+      return stored.secret;
     } catch {
-      // A missing record, an invalid key, or a store that cannot answer all mean
-      // "no stored secret"; the caller falls back to asking the user.
+      // A missing record, an invalid legacy key, or a store that cannot answer
+      // all mean "no stored secret"; the caller falls back to asking the user.
     }
   }
   return null;
 }
 
+/**
+ * The id segment earlier versions wrote into the key.
+ *
+ * Kept only so those records can still be found. It is lossy on purpose — that
+ * lossiness is why the app id moved into the value — so it is never used for a
+ * write.
+ */
+function legacyIdSegment(appId) {
+  return String(appId ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/gu, '-')
+    .replace(/^[^a-z]+/u, '') || 'app';
+}
+
 async function writeStoredSecret(ctx, appId, secret, logger = console) {
   const credentials = ctx.get?.('credentials');
   if (!credentials?.modifyRecord || !appId || !secret) return false;
-  const key = credentialKey(appId);
-  // A key the store would reject must never reach it: one bad key stops the
-  // whole credential file from loading, and the app with it.
-  if (!isValidCredentialKey(key)) {
-    logger.warn?.(`[feishu] refusing to store a secret under an invalid credential key: ${key}`);
-    return false;
-  }
   try {
-    await credentials.modifyRecord(key, async () => ({ kind: 'api-key', key: secret }));
+    // The app id travels in the value, so the key is a constant that cannot be
+    // rejected and cannot lose information.
+    await credentials.modifyRecord(CREDENTIAL_KEY, async () => ({
+      kind: 'api-key',
+      key: secret,
+      appId,
+    }));
     return true;
   } catch (error) {
     logger.warn?.(`[feishu] could not store the secret: ${error?.message ?? error}`);
@@ -735,33 +751,39 @@ async function writeStoredSecret(ctx, appId, secret, logger = console) {
 }
 
 /**
- * The credential-store key for one app's secret.
+ * The credential record for this bridge.
  *
- * The store validates every record key as exactly `<scope>/<id>`:
+ * One fixed key, with the app id stored **in the value**.
  *
- *     function parseCredentialKey(value) {
- *       const segments = value.split("/");
- *       if (segments.length !== 2) throw new TypeError(...)
- *     }
+ * The store constrains keys hard — exactly two segments, each matching
+ * `/^[a-z][a-z0-9-]*$/`, validated over the whole file when it loads — and a
+ * single violation stops the app from starting. Feishu app ids look like
+ * `cli_aa605ec29f395ccf`, whose underscore is legal to Feishu and illegal here,
+ * so putting the id in the key means mapping it into that alphabet. That mapping
+ * is lossy: `cli_a` and `cli-a` would become the same record.
  *
- * and it runs that over **every** key when the file loads. A key in any other
- * shape — notably the `dsh-feishu-only:cli_xxx` form an earlier version wrote —
- * makes the whole credential store fail to load, which is what stopped the app
- * from starting. The id segment must also be free of `/`, or the key would gain
- * a third segment and be rejected for the same reason.
+ * Keeping the id in the value removes the problem instead of working around it.
+ * `dsh-feishu-only/app` is fixed and always valid, the id is stored verbatim and
+ * round-trips exactly, and a future key-format change cannot orphan the secret.
  */
-function credentialKey(appId) {
-  const scope = 'dsh-feishu-only';
-  // A slash in the id would produce three segments and fail validation, so it
-  // is replaced rather than silently corrupting the store.
-  const id = String(appId ?? '').replace(/[/\\]+/gu, '_');
-  return `${scope}/${id}`;
-}
+const CREDENTIAL_KEY = 'dsh-feishu-only/app';
 
-/** Whether a key satisfies the store's `<scope>/<id>` rule. */
-function isValidCredentialKey(key) {
-  const segments = String(key ?? '').split('/');
-  return segments.length === 2 && segments[0] !== '' && segments[1] !== '';
+/** Shape of the stored value: the secret for one app id. */
+function readBridgeRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  if (record.kind === 'api-key' && typeof record.key === 'string') {
+    // `appId` is what the record belongs to. A record written before the id was
+    // stored has no `appId`; it is accepted for any app so an upgrade does not
+    // invalidate an existing secret.
+    return { appId: typeof record.appId === 'string' ? record.appId : null, secret: record.key };
+  }
+  if (record.kind === 'grant' && typeof record.payload?.secret === 'string') {
+    return {
+      appId: typeof record.payload.appId === 'string' ? record.payload.appId : null,
+      secret: record.payload.secret,
+    };
+  }
+  return null;
 }
 
 /** Show only enough of an identifier to recognize it. */

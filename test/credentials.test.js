@@ -1,18 +1,21 @@
 /**
- * Credential keys must satisfy the store's `<scope>/<id>` rule.
+ * Credential storage must not be able to break the app.
  *
- * This is not a style preference. The store runs `parseCredentialKey` over every
- * record key when it loads the file:
+ * The store validates every record key when it loads the file:
  *
  *     const segments = value.split('/')
  *     if (segments.length !== 2) throw new TypeError(...)
+ *     for (const segment of segments)
+ *       if (!/^[a-z][a-z0-9-]*$/.test(segment)) throw new TypeError(...)
  *
- * so a single malformed key makes the *entire credential store* fail to load.
- * One earlier version wrote `dsh-feishu-only:cli_xxx`, which stopped the app from
- * starting and needed a hand edit to recover.
+ * One key breaking either rule makes the *entire* credential store fail to load,
+ * and the app fails to start with it. That happened twice while this bridge put
+ * the Feishu app id in the key: `cli_aa605ec29f395ccf` contains `_`, which Feishu
+ * allows and that pattern rejects.
  *
- * These tests therefore behave like that validator, and the fake store throws the
- * way the real one does.
+ * The fix is structural, not a mapping: the key is a constant and the app id
+ * lives in the value. These tests pin that, and pin that a record cannot be
+ * mistaken for a different app's.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,15 +24,19 @@ import { apply } from '../index.js';
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
 
-/** The store's own rule, reproduced exactly. */
+/** The store's own rules, transcribed. */
+const KEY_SEGMENT_PATTERN = /^[a-z][a-z0-9-]*$/u;
+
 function assertValidKey(key) {
   const segments = String(key).split('/');
-  assert.equal(
-    segments.length,
-    2,
-    `credential key "${key}" must be "<scope>/<id>"`,
-  );
-  assert.ok(segments[0] !== '' && segments[1] !== '', `credential key "${key}" has an empty segment`);
+  assert.equal(segments.length, 2, `credential key "${key}" must be "<scope>/<id>"`);
+  for (const segment of segments) {
+    assert.match(
+      segment,
+      KEY_SEGMENT_PATTERN,
+      `credential key segment "${segment}" must match ${KEY_SEGMENT_PATTERN}`,
+    );
+  }
 }
 
 function stubContext({ routes = [], store = new Map(), webServer = true, keys = [] } = {}) {
@@ -44,6 +51,8 @@ function stubContext({ routes = [], store = new Map(), webServer = true, keys = 
   };
   const credentialService = {
     async readRecord(key) {
+      // A store that refuses invalid keys is the realistic one: it throws when
+      // the file is loaded if any key is malformed.
       assertValidKey(key);
       return store.has(key) ? store.get(key) : null;
     },
@@ -80,21 +89,6 @@ function stubContext({ routes = [], store = new Map(), webServer = true, keys = 
   };
 }
 
-/** Answer every platform call with a credential rejection, so only the write matters. */
-function stubFetchRejecting() {
-  return async () => ({
-    ok: false,
-    status: 400,
-    headers: new Map([['content-type', 'application/json']]),
-    async json() {
-      return { code: 10003, msg: 'invalid param' };
-    },
-    async text() {
-      return '{"code":10003}';
-    },
-  });
-}
-
 /** A platform that accepts the credential pair, so the write path is reached. */
 function stubFetchAccepting() {
   return async (url) => {
@@ -119,84 +113,144 @@ function stubFetchAccepting() {
         },
       };
     }
-    // The socket endpoint and anything else: refuse, so no real connection runs.
-    return {
-      ok: false,
-      status: 400,
-      headers: new Map([['content-type', 'application/json']]),
-      async json() {
-        return { code: 1, msg: 'not available in tests' };
-      },
-    };
+    throw new Error('no socket in tests');
   };
 }
 
-test('connecting stores the secret under a valid key', async () => {
+/** Answer every platform call with a credential rejection. */
+function stubFetchRejecting() {
+  return async () => ({
+    ok: false,
+    status: 400,
+    headers: new Map([['content-type', 'application/json']]),
+    async json() {
+      return { code: 10003, msg: 'invalid param' };
+    },
+    async text() {
+      return '{"code":10003}';
+    },
+  });
+}
+
+/** Run one connect request with a stubbed platform. */
+async function connectWith(appId, secret = 'SECRET') {
   const routes = [];
   const ctx = stubContext({ routes });
   await apply(ctx, { enabled: false });
-
   const connect = routes.find((route) => route.path.endsWith('/connect'));
   const original = globalThis.fetch;
-  // The pair must verify before the secret is stored, so the stub has to accept
-  // the credential calls. Everything after that — socket endpoint discovery —
-  // fails on purpose: the write happens before the connection, and a real socket
-  // would keep the test process alive.
   globalThis.fetch = stubFetchAccepting();
   try {
     await connect.resource(new Request(
-      'http://localhost/connect?appId=cli_aa605ec29f395ccf&appSecret=SECRET',
+      `http://localhost/connect?appId=${encodeURIComponent(appId)}&appSecret=${secret}`,
     ));
   } finally {
     globalThis.fetch = original;
   }
+  return ctx;
+}
 
-  assert.ok(ctx.writtenKeys.length > 0, 'the secret was stored');
+test('the stored key is a constant, independent of the app id', async () => {
+  const first = await connectWith('cli_aa605ec29f395ccf');
+  const second = await connectWith('cli_a1b2c3d4e5f67890');
+
+  assert.equal(first.writtenKeys.length, 1);
+  assert.equal(second.writtenKeys.length, 1);
+  assert.equal(
+    first.writtenKeys[0],
+    second.writtenKeys[0],
+    'two different apps use the same record slot',
+  );
+  for (const key of first.writtenKeys) assertValidKey(key);
+});
+
+test('a Feishu app id with underscores never reaches the key', async () => {
+  // The exact id shape that broke the launch.
+  const ctx = await connectWith('cli_aa605ec29f395ccf');
   for (const key of ctx.writtenKeys) {
     assertValidKey(key);
-    assert.ok(!key.includes(':'), `no colon in ${key}`);
-    assert.equal(key, 'dsh-feishu-only/cli_aa605ec29f395ccf');
+    assert.ok(!key.includes('_'), `the app id was not put in the key: ${key}`);
+    assert.ok(!key.includes('cli_'), 'and no fragment of it either');
   }
 });
 
-test('an app id containing a slash still yields a two-segment key', async () => {
-  // The id becomes the second segment, so a slash in it would make three and the
-  // store would reject the write — and then refuse to load the file.
-  const routes = [];
-  const ctx = stubContext({ routes });
-  await apply(ctx, { enabled: false });
-
-  const connect = routes.find((route) => route.path.endsWith('/connect'));
-  const original = globalThis.fetch;
-  globalThis.fetch = stubFetchRejecting();
-  try {
-    await connect.resource(new Request(
-      `http://localhost/connect?appId=${encodeURIComponent('cli/weird')}&appSecret=SECRET`,
-    ));
-  } finally {
-    globalThis.fetch = original;
-  }
-
-  for (const key of ctx.writtenKeys) assertValidKey(key);
+test('the app id is stored verbatim in the value', async () => {
+  const ctx = await connectWith('cli_aa605ec29f395ccf', 'the-secret');
+  const record = [...ctx.store.values()][0];
+  assert.equal(record.appId, 'cli_aa605ec29f395ccf', 'the id round-trips exactly');
+  assert.equal(record.key, 'the-secret');
 });
 
-test('a legacy colon-keyed secret is still readable', async () => {
-  // The secret is read through the diagnostic route rather than a startup
-  // connect: the read is what is under test, and a startup connect would open a
-  // socket the test then has to tear down.
+test('a record is only used for the app it names', async () => {
+  // Two apps share one slot, so the value has to say which one it belongs to.
   const store = new Map([
-    ['dsh-feishu-only:cli_old', { kind: 'api-key', key: 'OLD-SECRET' }],
+    ['dsh-feishu-only/app', { kind: 'api-key', key: 'SECRET-A', appId: 'cli_a' }],
   ]);
   const routes = [];
   const ctx = stubContext({ routes, store });
-  // The legacy key is invalid by the store's rule, so this store answers any key
-  // rather than validating: it models a file written by the older version.
+  await apply(ctx, { enabled: false });
+
+  const original = globalThis.fetch;
+  let sent = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('tenant_access_token')) sent = String(init?.body ?? '');
+    return {
+      ok: false, status: 400,
+      headers: new Map([['content-type', 'application/json']]),
+      async json() { return { code: 10003, msg: 'invalid' }; },
+      async text() { return '{}'; },
+    };
+  };
+  try {
+    const diagnose = routes.find((route) => route.path.endsWith('/diagnose'));
+    await diagnose.resource(new Request('http://localhost/diagnose?appId=cli_b'));
+  } finally {
+    globalThis.fetch = original;
+  }
+  // App B must not borrow app A's secret.
+  assert.ok(sent === null || !sent.includes('SECRET-A'), 'the other app\'s secret is not used');
+});
+
+test('a legacy record without an app id is still accepted', async () => {
+  const store = new Map([
+    ['dsh-feishu-only/app', { kind: 'api-key', key: 'OLD-SECRET' }],
+  ]);
+  const routes = [];
+  const ctx = stubContext({ routes, store });
+  await apply(ctx, { enabled: false });
+
+  const original = globalThis.fetch;
+  let sent = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('tenant_access_token')) sent = String(init?.body ?? '');
+    return {
+      ok: false, status: 400,
+      headers: new Map([['content-type', 'application/json']]),
+      async json() { return { code: 10003, msg: 'invalid' }; },
+      async text() { return '{}'; },
+    };
+  };
+  try {
+    const diagnose = routes.find((route) => route.path.endsWith('/diagnose'));
+    await diagnose.resource(new Request('http://localhost/diagnose?appId=cli_any'));
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.ok(sent !== null && sent.includes('OLD-SECRET'), 'the upgrade keeps the existing secret');
+});
+
+test('a colon-keyed record from an even older version is still readable', async () => {
+  // That key is invalid by the store's rule, so a real store throws when asked.
+  // The reader must survive the throw and try the next candidate.
+  const routes = [];
+  const ctx = stubContext({ routes });
   ctx.get = (name) => {
     if (name === 'webServer') return { register: (r) => { routes.push(r); return () => {}; } };
     if (name === 'credentials') {
       return {
         async readRecord(key) {
-          return store.has(key) ? store.get(key) : null;
+          if (key.includes(':')) return { kind: 'api-key', key: 'ANCIENT-SECRET' };
+          return null;
         },
         async modifyRecord() {},
       };
@@ -206,23 +260,14 @@ test('a legacy colon-keyed secret is still readable', async () => {
   await apply(ctx, { enabled: false });
 
   const original = globalThis.fetch;
-  let sentSecret = null;
+  let sent = null;
   globalThis.fetch = async (url, init) => {
-    // The token request carries the pair it was given; capturing it proves which
-    // secret the plugin resolved.
-    if (String(url).includes('tenant_access_token')) {
-      sentSecret = String(init?.body ?? '');
-    }
+    if (String(url).includes('tenant_access_token')) sent = String(init?.body ?? '');
     return {
-      ok: false,
-      status: 400,
+      ok: false, status: 400,
       headers: new Map([['content-type', 'application/json']]),
-      async json() {
-        return { code: 10003, msg: 'invalid param' };
-      },
-      async text() {
-        return '{"code":10003}';
-      },
+      async json() { return { code: 10003, msg: 'invalid' }; },
+      async text() { return '{}'; },
     };
   };
   try {
@@ -231,13 +276,10 @@ test('a legacy colon-keyed secret is still readable', async () => {
   } finally {
     globalThis.fetch = original;
   }
-  assert.ok(sentSecret !== null, 'a credential attempt was made');
-  assert.ok(sentSecret.includes('OLD-SECRET'), 'the legacy record supplied the secret');
+  assert.ok(sent !== null && sent.includes('ANCIENT-SECRET'));
 });
 
 test('a store that throws on read does not break the launch', async () => {
-  // What the real store does when the file holds an invalid key. The plugin must
-  // still load, because a broken credential file must not cost the app its UI.
   const routes = [];
   const ctx = stubContext({ routes });
   ctx.get = (name) => {
@@ -257,7 +299,6 @@ test('a store that throws on read does not break the launch', async () => {
   await apply(ctx, { enabled: false });
   assert.ok(routes.length > 0, 'the plugin loaded and can still report the problem');
 
-  // The diagnostic reports the missing secret instead of throwing.
   const original = globalThis.fetch;
   globalThis.fetch = stubFetchRejecting();
   try {
