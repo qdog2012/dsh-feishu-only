@@ -245,7 +245,7 @@ function fakeContext(services = {}) {
   };
 }
 
-function makeBridge({ api = new FakeApi(), harness = new FakeHarness(), config = {} } = {}) {
+function makeBridge({ api = new FakeApi(), harness = new FakeHarness(), config = {}, services = {} } = {}) {
   const state = new InteractionState({ logger: silent });
   const interactions = {
     resolveApproval: () => ({ ok: true }),
@@ -254,7 +254,7 @@ function makeBridge({ api = new FakeApi(), harness = new FakeHarness(), config =
     install: () => () => {},
   };
   const bridge = new FeishuBridge({
-    ctx: fakeContext(),
+    ctx: fakeContext(services),
     config: {
       version: '0.1.0',
       groupRequireMention: true,
@@ -667,4 +667,27 @@ test('the text fallback drops card-only markup', async () => {
   assert.ok(!text.includes('<font'), 'font tags are stripped');
   assert.match(text, /\[按钮\]/u, 'a button becomes its label');
   assert.match(text, /\[图片\]/u);
+});
+test('the project list is one button per project, labelled with the project', async () => {
+  const workspaces = [
+    { id: 'w1', title: '飞书插件', path: 'D:/p/feishu' },
+    { id: 'w2', title: '另一个项目', path: 'D:/p/other' },
+  ];
+  const { bridge, api } = makeBridge({
+    services: { workspaceRegistry: { list: () => workspaces } },
+  });
+  await bridge.onMessage(messageEvent('/project'));
+
+  const payload = JSON.stringify(api.lastCard);
+  // A separate numbered text list plus "选择 N" buttons repeated every name;
+  // the label must carry the project itself.
+  assert.ok(!payload.includes('选择 1'), 'no separate numbered button');
+  assert.ok(payload.includes('1. 飞书插件'), 'the title is the button label');
+  assert.ok(payload.includes('2. 另一个项目'));
+  // Each title appears once: inside its button, not repeated as body text.
+  for (const title of ['飞书插件', '另一个项目']) {
+    assert.equal(payload.split(title).length - 1, 1, title + ' appears exactly once');
+  }
+  // Schema 2.0 only: a markdown element would get the card rejected.
+  assert.ok(!payload.includes('\\"tag\\":\\"markdown\\"'), 'no schema 1.0 element');
 });
