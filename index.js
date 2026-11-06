@@ -30,6 +30,7 @@ import { PreviewService } from './lib/preview.js';
 import { qrSvg } from './lib/qr.js';
 import { MENU, describeMenuError, syncSlashMenu } from './lib/menu.js';
 import { diagnose } from './lib/diagnostics.js';
+import { noticeTarget, sendConnectionNotice, shouldSuppress } from './lib/notify.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
 
 /**
@@ -112,6 +113,23 @@ export async function apply(ctx, rawConfig) {
   // ------------------------------------------------------------------ runtime
 
   /**
+   * Operators the bridge has seen, keyed by open id with the time they last
+   * spoke.
+   *
+   * This lives at `apply` scope, not per connection: a connection notice is
+   * meant for whoever has been using the bot, and a reconnect — from the
+   * settings page or a restart — must not forget them. The most recent one is
+   * the notice target.
+   */
+  const operators = new Map();
+  const rememberOperator = (openId) => {
+    if (!openId) return;
+    operators.set(openId, { lastSeen: Date.now() });
+  };
+  /** When the last notice went out, for flap suppression. */
+  let lastNoticeAt = NaN;
+
+  /**
    * Start the connection for one credential pair and wire every handler.
    *
    * Bot identity is verified BEFORE the socket opens: a credential pair that
@@ -122,6 +140,22 @@ export async function apply(ctx, rawConfig) {
     await stopRuntime();
     lastError = null;
     const api = new FeishuApi({ appId, appSecret, brand, logger });
+
+    /** Best-effort, never throws: a notice must not feed back into the bridge. */
+    const notify = (event, reason) => {
+      if (!config.notifyConnection) return;
+      const openId = noticeTarget(operators);
+      if (!openId) {
+        logger.debug?.('[feishu] no operator to notify yet');
+        return;
+      }
+      if (shouldSuppress(lastNoticeAt, Date.now(), event)) {
+        logger.debug?.('[feishu] connection notice suppressed as flapping');
+        return;
+      }
+      lastNoticeAt = Date.now();
+      void sendConnectionNotice({ api, logger }, { openId, event, reason });
+    };
 
     let bridge = null;
     const interactions = new InteractionBridge({
@@ -155,6 +189,7 @@ export async function apply(ctx, rawConfig) {
     disposers.push(ws.on('im.message.receive_v1', async ({ event }) => {
       bridge.updateHealth({ ws: ws.state });
       const message = event?.message;
+      rememberOperator(event?.sender?.sender_id?.open_id ?? message?.sender_id?.open_id);
       noteDiagnostic({
         kind: 'inbound',
         chat: message?.chat_id,
@@ -171,6 +206,15 @@ export async function apply(ctx, rawConfig) {
     disposers.push(ws.on('card.action.trigger', async ({ event }) => bridge.onCardAction(event)));
 
     disposers.push(interactions.install());
+
+    // Connection transitions, straight from the socket: connected -> anything
+    // else is a disconnect worth reporting, and re-entering connected after a
+    // drop is a recovery worth reporting too.
+    disposers.push(ws.on('state.change', ({ from, to }) => {
+      if (from === WS_STATE.CONNECTED && to !== WS_STATE.CONNECTED) {
+        notify('disconnected', `连接状态：${to}`);
+      }
+    }));
 
     const healthTimer = setInterval(() => {
       bridge.updateHealth({ ws: ws.state });
@@ -206,10 +250,12 @@ export async function apply(ctx, rawConfig) {
     try {
       await ws.start();
       bridge.updateHealth({ ws: WS_STATE.CONNECTED });
+      notify('connected');
     } catch (error) {
       // `start()` schedules a reconnect before it throws, so the socket must be
       // disposed too: otherwise every failed attempt leaves a timer that retries
       // forever in the background, and a failure looks like a half-open bridge.
+      notify('disconnected', error?.message ?? String(error));
       try {
         await ws.dispose();
       } catch {
