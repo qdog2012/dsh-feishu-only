@@ -12,23 +12,42 @@ const silent = { info() {}, warn() {}, error() {}, debug() {} };
  * without a bot credential, and a scoping mistake there throws only when a
  * handler is actually invoked — which a load-only check would never catch.
  */
-function stubContext({ routes = [], credentials = null } = {}) {
+function stubContext({ routes = [], credentials = null, webServerAvailable = true } = {}) {
+  const webServer = {
+    register(route) {
+      routes.push(route);
+      return () => {
+        const index = routes.indexOf(route);
+        if (index >= 0) routes.splice(index, 1);
+      };
+    },
+  };
   return {
     logger: silent,
     get(name) {
-      if (name === 'webServer') {
-        return {
-          register(route) {
-            routes.push(route);
-            return () => {
-              const index = routes.indexOf(route);
-              if (index >= 0) routes.splice(index, 1);
-            };
-          },
-        };
-      }
+      // A cold start means `get('webServer')` is undefined: the carrier
+      // activates after this plugin. Tests use `inject` to model readiness.
+      if (name === 'webServer') return webServerAvailable ? webServer : undefined;
       if (name === 'credentials') return credentials;
       return undefined;
+    },
+    /**
+     * Cordis' inject contract: run the callback now if every service is
+     * present, otherwise when it becomes available. The stub runs it eagerly
+     * so registration is observable, which is the behaviour the routes need.
+     */
+    inject(names, callback) {
+      const dependencies = Array.isArray(names) ? names : [names];
+      const available = dependencies.every((name) => (
+        name === 'webServer' ? webServerAvailable : false
+      ));
+      if (available) {
+        callback({
+          webServer,
+          get: (name) => (name === 'webServer' ? webServer : undefined),
+        });
+      }
+      return () => {};
     },
     effect(_fn) {},
     on() {
@@ -136,6 +155,43 @@ test('teardown disposers remove every registered route', async () => {
   assert.equal(routes.length, 7);
   for (const dispose of disposers) dispose();
   assert.equal(routes.length, 0);
+});
+
+test('routes are declared through ctx.inject, not a one-shot service read', async () => {
+  // Regression guard: `apply` runs before the HTTP carrier activates on a cold
+  // start, so `ctx.get('webServer')` is undefined. Reading it once left every
+  // route unregistered after a restart while the client page still mounted.
+  const routes = [];
+  const ctx = stubContext({ routes });
+  const injected = [];
+  const originalInject = ctx.inject;
+  ctx.inject = (names, callback) => {
+    injected.push(Array.isArray(names) ? names : [names]);
+    return originalInject(names, callback);
+  };
+  await apply(ctx, { enabled: false });
+  assert.ok(
+    injected.some((names) => names.includes('webServer')),
+    'webServer must be injected so registration waits for the carrier',
+  );
+  assert.equal(routes.length, 7, 'and the routes still register once it is ready');
+});
+
+test('re-injecting the carrier replaces routes instead of duplicating them', async () => {
+  const routes = [];
+  const ctx = stubContext({ routes });
+  let rerun;
+  const originalInject = ctx.inject;
+  ctx.inject = (names, callback) => {
+    if (Array.isArray(names) && names.includes('webServer')) rerun = callback;
+    return originalInject(names, callback);
+  };
+  await apply(ctx, { enabled: false });
+  assert.equal(routes.length, 7);
+
+  // The service is replaced; Cordis calls the inject callback again.
+  rerun({ webServer: { register: (route) => { routes.push(route); return () => {}; } } });
+  assert.equal(routes.length, 7, 'the previous generation was released first');
 });
 
 test('the qr-image route refuses a URL it did not issue', async () => {

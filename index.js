@@ -206,9 +206,24 @@ export async function apply(ctx, rawConfig) {
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   });
 
-  const webServer = ctx.get?.('webServer');
   const routeDisposers = [];
-  if (webServer?.register) {
+  // `ctx.get('webServer')` is undefined during a cold start: the HTTP carrier
+  // activates after this plugin's `apply` runs. `ctx.inject` defers the
+  // registration until the service exists (and re-runs it if it is replaced),
+  // which is what makes the routes survive a restart.
+  ctx.inject(['webServer'], (routeCtx) => {
+    const webServer = routeCtx.webServer;
+    if (!webServer?.register) return;
+    // This callback re-runs when the service is replaced, so release the
+    // previous generation's routes first instead of stacking duplicates.
+    while (routeDisposers.length > 0) {
+      const dispose = routeDisposers.pop();
+      try {
+        dispose();
+      } catch {
+        // A route from a dead service needs no further action.
+      }
+    }
     routeDisposers.push(webServer.register({
       kind: 'exact',
       path: `${base}/status`,
@@ -319,7 +334,7 @@ export async function apply(ctx, rawConfig) {
         return json({ ok: true, ...buildStatus() });
       },
     }));
-  }
+  });
 
   function buildStatus() {
     return {
