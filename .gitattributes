@@ -1,0 +1,8 @@
+# Normalize line endings so the shipped JavaScript is byte-stable across
+# checkouts: the Host loads these files directly from the linked package.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
