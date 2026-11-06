@@ -21,6 +21,8 @@ class FakeSocket {
   static OPEN = 1;
   static CONNECTING = 0;
   readyState = 0;
+  /** Mirrors the platform default so a test can assert the client changed it. */
+  binaryType = 'blob';
   sent = [];
   #listeners = new Map();
 
@@ -327,6 +329,30 @@ test('a control ping frame on the socket is handled without touching the bridge'
     headers: [{ key: 'type', value: 'ping' }],
   });
   socket.deliver(ping);
+  await settle();
+  assert.equal(api.cards.length, 0);
+});
+
+test('a frame delivered as a Blob is decoded, not dropped', async (t) => {
+  // Node's WebSocket yields binary frames as a Blob unless binaryType is set.
+  // A Blob has no byteLength, so every inbound frame — the server's pong and
+  // every message event — was silently discarded and the bot appeared deaf.
+  const { socket, api, settle } = await wire(t);
+  const frame = eventFrame(messageEventBody({ text: '/help', messageId: 'om_blob' }));
+  socket.deliver(new Blob([frame]));
+  await settle();
+  assert.equal(api.cards.length, 1, 'the Blob frame reached the bridge');
+});
+
+test('the socket asks for arraybuffer binary delivery', async (t) => {
+  const { socket, settle } = await wire(t);
+  await settle();
+  assert.equal(socket.binaryType, 'arraybuffer');
+});
+
+test('an empty inbound frame is ignored rather than decoded', async (t) => {
+  const { socket, api, settle } = await wire(t);
+  socket.deliver(new Uint8Array(0));
   await settle();
   assert.equal(api.cards.length, 0);
 });
