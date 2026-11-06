@@ -84,9 +84,70 @@ test('the task list carries a snapshot key on every select button', () => {
     selectButtons.map((button) => button.behaviors[0].value.index),
     [1, 2],
   );
+});
+
+test('a task is selected by its own title, not by a separate index list', () => {
+  // The card used to print every task as text and then offer "选择 1 / 选择 2"
+  // buttons: the same list twice, and the button did not say what it selected.
+  const payload = taskListCard({
+    currentTask: null,
+    tasks: [
+      { sessionId: 's1', title: '重构卡片系统', isCurrent: true },
+      { sessionId: 's2', title: '修复长连接丢帧', running: true },
+      { sessionId: 's3', title: '普通任务' },
+    ],
+    page: 1,
+    totalPages: 1,
+    total: 3,
+    pageKey: 'snap-1',
+  });
+  const select = buttonsOf(payload).filter((button) => button.behaviors[0].value.id === 'task.select');
+  assert.equal(select.length, 3, 'one button per task');
+  assert.deepEqual(select.map((button) => button.text.content), [
+    '1. 重构卡片系统 [当前]',
+    '2. 修复长连接丢帧 [执行中]',
+    '3. 普通任务',
+  ]);
+
+  // The titles must appear exactly once, inside the buttons.
   const text = JSON.stringify(payload);
-  assert.ok(text.includes('**当前**'), 'the current task must be marked');
-  assert.ok(text.includes('执行中'), 'a running task must be marked');
+  for (const title of ['重构卡片系统', '修复长连接丢帧', '普通任务']) {
+    const occurrences = text.split(title).length - 1;
+    assert.equal(occurrences, 1, `${title} is not repeated as body text`);
+  }
+  assert.ok(!text.includes('选择 1'), 'no separate numbered button row');
+  assert.ok(!text.includes('选择 2'));
+});
+
+test('the current task is the primary button', () => {
+  const payload = taskListCard({
+    currentTask: null,
+    tasks: [
+      { sessionId: 's1', title: 'a', isCurrent: true },
+      { sessionId: 's2', title: 'b' },
+    ],
+    page: 1,
+    totalPages: 1,
+    total: 2,
+    pageKey: 'k',
+  });
+  const select = buttonsOf(payload).filter((button) => button.behaviors[0].value.id === 'task.select');
+  assert.equal(select[0].type, 'primary');
+  assert.equal(select[1].type, 'default');
+});
+
+test('a long task title is clamped so the button stays readable', () => {
+  const payload = taskListCard({
+    currentTask: null,
+    tasks: [{ sessionId: 's1', title: '标'.repeat(200) }],
+    page: 1,
+    totalPages: 1,
+    total: 1,
+    pageKey: 'k',
+  });
+  const select = buttonsOf(payload).find((button) => button.behaviors[0].value.id === 'task.select');
+  assert.ok(select.text.content.length < 100, 'the label is bounded');
+  assert.ok(select.text.content.endsWith('…'), 'and marked as truncated');
 });
 
 test('the task list offers paging only when there is another page', () => {
