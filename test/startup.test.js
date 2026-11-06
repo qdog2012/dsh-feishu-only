@@ -155,3 +155,22 @@ test('a rejected configuration is reported rather than swallowed', async () => {
   assert.ok(body.configProblems.length > 0, 'the offending field is named');
   assert.equal(body.enabled, false, 'and the bridge does not run half-configured');
 });
+
+test('status reports a build id that survives a re-apply', async () => {
+  // The id identifies the loaded module, not the plugin row: two `apply` calls
+  // in one process share it, and only a restart changes it. That is what makes
+  // "did the reload take effect?" answerable from outside.
+  const first = [];
+  await apply(stubContext({ routes: first }), { enabled: false });
+  const statusA = first.find((route) => route.path.endsWith('/status'));
+  const a = await (await statusA.resource(new Request('http://localhost/status'))).json();
+
+  const second = [];
+  await apply(stubContext({ routes: second }), { enabled: false });
+  const statusB = second.find((route) => route.path.endsWith('/status'));
+  const b = await (await statusB.resource(new Request('http://localhost/status'))).json();
+
+  assert.equal(typeof a.build, 'string');
+  assert.ok(a.build.length > 0, 'a build id is reported');
+  assert.equal(a.build, b.build, 'the same module instance keeps its build id');
+});

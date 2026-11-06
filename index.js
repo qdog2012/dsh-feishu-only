@@ -33,6 +33,16 @@ import { diagnose } from './lib/diagnostics.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
 
 /**
+ * Identifies this module instance.
+ *
+ * Evaluated once when the module is first imported, so a running process keeps
+ * reporting the same value no matter how often the plugin is disabled, enabled
+ * or reinstalled. It exists to make "did the reload take effect?" answerable
+ * from the outside.
+ */
+const BUILD_ID = `${PLUGIN_VERSION}+${Date.now().toString(36)}`;
+
+/**
  * The plugin's declared configuration schema.
  *
  * Exposed as a plain JSON-Schema document for tooling and the settings surface.
@@ -490,6 +500,14 @@ export async function apply(ctx, rawConfig) {
       availabilityWarning: availabilityWarning(),
       /** The `/` menu reconcile result, or null before it ran. */
       menu: menuReport,
+      /**
+       * The module's own build id.
+       *
+       * A loaded ES module keeps its value forever, so comparing this across a
+       * reload attempt answers "did the running code actually change?" — which
+       * is otherwise invisible from outside the process.
+       */
+      build: BUILD_ID,
     };
   }
 
