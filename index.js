@@ -29,6 +29,7 @@ import { FeishuBridge } from './lib/bridge.js';
 import { PreviewService } from './lib/preview.js';
 import { qrSvg } from './lib/qr.js';
 import { MENU, describeMenuError, syncSlashMenu } from './lib/menu.js';
+import { diagnose } from './lib/diagnostics.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
 
 /**
@@ -384,6 +385,43 @@ export async function apply(ctx, rawConfig) {
           return json({ ok: true, items, wanted: MENU.map((item) => item.command) });
         } catch (error) {
           return json({ ok: false, error: describeMenuError(error) }, 400);
+        }
+      },
+    }));
+
+    routeDisposers.push(webServer.register({
+      kind: 'exact',
+      path: `${base}/diagnose`,
+      resource: async (request) => {
+        const url = new URL(request.url);
+        // The diagnostic can run without a live connection, which is the point:
+        // it names the layer that is broken instead of reporting "not connected".
+        const appId = url.searchParams.get('appId') || config.appId || '';
+        const stored = config.appSecret || await readStoredSecret(ctx, appId);
+        const appSecret = url.searchParams.get('appSecret') || stored || '';
+        try {
+          const report = await diagnose({
+            appId,
+            appSecret,
+            brand: config.brand,
+            logger,
+            harness,
+          });
+          return json(report, report.ok ? 200 : 400);
+        } catch (error) {
+          // A thrown probe is a bug in the probe, not a verdict; still answer
+          // with a well-formed failure so the page can render it.
+          return json({
+            ok: false,
+            appId,
+            checks: [],
+            focus: {
+              layer: 'credentials',
+              verdict: 'failed',
+              detail: String(error?.message ?? error).slice(0, 300),
+              hint: '诊断本身出错，请查看 Harness 日志。',
+            },
+          }, 500);
         }
       },
     }));

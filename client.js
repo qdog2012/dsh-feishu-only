@@ -71,6 +71,10 @@ window.__ModuleLoader__.load({
       verifyTitle: '接入检查',
       verify: '检查接入',
       verifying: '检查中…',
+      diagnose: '诊断连接',
+      diagnosing: '诊断中…',
+      diagnoseClean: '各层均通过，未发现问题。',
+      layerCredentials: '凭据',
       helpTitle: '需要平台配置时',
       helpBody:
         '机器人能力、消息权限、事件订阅与卡片回调都必须开启，并且“事件配置”和“回调配置”两处都要设为“使用长连接接收”。扫码创建的应用已自动配置好这些。',
@@ -132,6 +136,10 @@ window.__ModuleLoader__.load({
       verifyTitle: 'Connection checks',
       verify: 'Run checks',
       verifying: 'Checking…',
+      diagnose: 'Diagnose',
+      diagnosing: 'Diagnosing…',
+      diagnoseClean: 'Every layer passed; nothing looks wrong.',
+      layerCredentials: 'Credentials',
       helpTitle: 'If you configure the app yourself',
       helpBody:
         'The bot capability, message scopes, the message event and the card callback must all be enabled, and BOTH the event and callback subscriptions must use the long connection. An app created by the QR flow is already configured.',
@@ -163,6 +171,7 @@ window.__ModuleLoader__.load({
 .dfo-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .dfo-dot-ok { background: var(--dsw-alias-state-success, #2ea043); }
 .dfo-dot-bad { background: var(--dsw-alias-state-danger, #d1242f); }
+.dfo-dot-warn { background: var(--dsw-alias-state-warning, #bf8700); }
 .dfo-dot-idle { background: var(--dsw-alias-text-tertiary, #8b949e); }
 .dfo-btn {
   appearance: none; border: 1px solid var(--dsw-alias-border-subtle);
@@ -206,6 +215,9 @@ window.__ModuleLoader__.load({
 }
 .dfo-alert-error { color: var(--dsw-alias-state-danger, #d1242f); border-color: currentColor; }
 .dfo-alert-ok { color: var(--dsw-alias-state-success, #2ea043); border-color: currentColor; }
+.dfo-alert-info { color: var(--dsw-alias-text-secondary); }
+.dfo-alert-warn { color: var(--dsw-alias-state-warning, #bf8700); border-color: currentColor; }
+.dfo-diagnosis { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .dfo-steps { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.8; color: var(--dsw-alias-text-secondary); }
 .dfo-link { color: var(--dsw-alias-accent-primary, #3370ff); text-decoration: none; font-size: 12.5px; }
 .dfo-link:hover { text-decoration: underline; }
@@ -265,6 +277,8 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState(null);
       const [verification, setVerification] = React.useState(null);
       const [qrSvg, setQrSvg] = React.useState(null);
+      /** Report from the layered diagnostic, or null before it ran. */
+      const [diagnosis, setDiagnosis] = React.useState(null);
 
       const [appId, setAppId] = React.useState('');
       const [appSecret, setAppSecret] = React.useState('');
@@ -396,6 +410,32 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /**
+       * Run the layered diagnostic.
+       *
+       * Unlike `verify`, this works before a connection exists — that is the
+       * case it is for — and it names the first broken layer so the user knows
+       * which console setting to change.
+       */
+      const runDiagnose = async () => {
+        setBusy('diagnose');
+        setDiagnosis(null);
+        try {
+          const query = new URLSearchParams();
+          const formId = (appId ?? '').trim();
+          const formSecret = (appSecret ?? '').trim();
+          if (formId) query.set('appId', formId);
+          if (formSecret) query.set('appSecret', formSecret);
+          const suffix = query.toString() ? `?${query.toString()}` : '';
+          const { body } = await getJson(`${API}/diagnose${suffix}`);
+          setDiagnosis(body);
+        } catch (cause) {
+          setError(String(cause?.message ?? cause));
+        } finally {
+          setBusy(null);
+        }
+      };
+
       const disconnect = async () => {
         if (typeof window !== 'undefined' && !window.confirm(t('disconnectConfirm'))) return;
         setBusy('disconnect');
@@ -455,6 +495,10 @@ window.__ModuleLoader__.load({
               className: 'dfo-btn', type: 'button', disabled: busy !== null,
               onClick: () => void runVerify(),
             }, busy === 'verify' ? t('verifying') : t('verify')),
+            h('button', {
+              className: 'dfo-btn', type: 'button', disabled: busy !== null,
+              onClick: () => void runDiagnose(),
+            }, busy === 'diagnose' ? t('diagnosing') : t('diagnose')),
             connected
               ? h('button', {
                   className: 'dfo-btn dfo-btn-danger', type: 'button',
@@ -469,6 +513,28 @@ window.__ModuleLoader__.load({
                   value: check.detail,
                   tone: check.ok ? 'ok' : 'bad',
                 })))
+            : null,
+          // The diagnostic works before a connection exists, and names the
+          // first broken layer so the fix is a specific console change.
+          diagnosis
+            ? h('div', { className: 'dfo-diagnosis' },
+                diagnosis.focus
+                  ? h(Alert, {
+                      kind: diagnosis.focus.verdict === 'failed' ? 'error' : 'info',
+                    },
+                      `${diagnosis.focus.layer === 'credentials' ? t('layerCredentials')
+                        : (diagnosis.checks.find((c) => c.layer === diagnosis.focus.layer)?.name
+                          ?? diagnosis.focus.layer)}：${diagnosis.focus.detail}`
+                      + (diagnosis.focus.hint ? ` — ${diagnosis.focus.hint}` : ''))
+                  : h(Alert, { kind: 'info' }, t('diagnoseClean')),
+                h('div', { className: 'dfo-rows' },
+                  (diagnosis.checks ?? []).map((check) => h(Row, {
+                    key: check.layer,
+                    label: check.name,
+                    value: check.detail,
+                    tone: check.verdict === 'ok' ? 'ok'
+                      : check.verdict === 'warning' ? 'warn' : 'bad',
+                  }))))
             : null),
 
         // ------------------------------------------------------------ QR flow
