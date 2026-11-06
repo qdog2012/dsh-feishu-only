@@ -655,3 +655,32 @@ test('a settings list does not repeat its options as body text', () => {
   assert.equal(count('low'), 1, 'an unselected option appears only as a button');
   assert.ok(!count('**1.'), 'no numbered body list');
 });
+
+test('every settings kind renders one option per row', () => {
+  // model, reasoning, permission and mode all funnel through this builder, so
+  // the shape is asserted for each rather than for one representative.
+  const kinds = [
+    { kind: 'model', title: '模型', current: 'a', options: [{ label: 'a', selected: true }, { label: 'b' }] },
+    { kind: 'reasoning', title: '推理强度', current: 'high', options: [{ label: 'low' }, { label: 'high', selected: true }] },
+    { kind: 'permission', title: '权限', current: 'never', options: [{ label: 'never', selected: true }, { label: 'auto' }] },
+    { kind: 'mode', title: '工作模式', current: '普通模式', options: [{ label: '普通模式', selected: true }, { label: '计划模式' }] },
+  ];
+  for (const spec of kinds) {
+    const payload = settingsCard({ ...spec, note: 'n' });
+    const selectRows = payload.body.elements
+      .filter((el) => el.tag === 'column_set')
+      .filter((row) => row.columns[0]?.elements[0]?.behaviors?.[0]?.value?.id === 'settings.select');
+    assert.equal(selectRows.length, spec.options.length, spec.kind + ': one row per option');
+    for (const row of selectRows) assert.equal(row.columns.length, 1, spec.kind + ': never paired');
+    // The callback still addresses the option by index, which is what the
+    // dispatcher resolves against the recorded snapshot.
+    assert.deepEqual(
+      selectRows.map((row) => row.columns[0].elements[0].behaviors[0].value.index),
+      spec.options.map((_, i) => i + 1),
+      spec.kind + ': indexes address the snapshot',
+    );
+    for (const row of selectRows) {
+      assert.equal(row.columns[0].elements[0].behaviors[0].value.kind, spec.kind);
+    }
+  }
+});
