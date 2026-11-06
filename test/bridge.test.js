@@ -608,7 +608,7 @@ test('a card button press by the owner selects the task', async () => {
 test('a stale snapshot reports that the list expired', async () => {
   const harness = new FakeHarness();
   harness.tasks = [{ sessionId: 's1', title: '任务', running: false, updatedAt: 1 }];
-  const { bridge, api } = makeBridge({ harness });
+  const { bridge } = makeBridge({ harness });
   await bridge.onMessage(messageEvent('/task'));
 
   const result = await bridge.onCardAction({
@@ -617,4 +617,54 @@ test('a stale snapshot reports that the list expired', async () => {
     context: { open_message_id: 'om_x', open_chat_id: 'oc_1' },
   });
   assert.match(result.toast.content, /过期|失效/u);
+});
+
+test('a rejected card falls back to plain text instead of silence', async () => {
+  const api = new FakeApi();
+  api.sendCard = async () => {
+    const error = new Error('invalid card');
+    error.code = 230025;
+    throw error;
+  };
+  const state = new InteractionState({ logger: silent });
+  const bridge = new FeishuBridge({
+    ctx: fakeContext(),
+    config: { version: '0.1.0', groupRequireMention: true, rejectInputWhileRunning: true },
+    api,
+    state,
+    harness: new FakeHarness(),
+    logger: silent,
+    interactions: { install: () => () => {} },
+    preview: null,
+  });
+
+  await bridge.onMessage(messageEvent('/help'));
+
+  assert.equal(api.cards.length, 0, 'the card itself was rejected');
+  assert.equal(api.texts.length, 1, 'the user still receives an answer');
+  assert.match(api.texts[0].text, /DeepSeek Harness/u, 'the help content survives');
+  assert.match(api.texts[0].text, /卡片渲染失败/u, 'the fallback is disclosed');
+  assert.match(api.texts[0].text, /230025/u, 'the platform code is reported');
+});
+
+test('the text fallback drops card-only markup', async () => {
+  const { renderCardAsText } = await import('../lib/bridge.js');
+  const payload = {
+    header: { title: { content: '标题' } },
+    body: {
+      elements: [
+        { tag: 'div', text: { tag: 'lark_md', content: '**粗体** <font color=\'grey\'>说明</font>' } },
+        { tag: 'hr' },
+        { tag: 'button', text: { content: '按钮' }, behaviors: [{ type: 'callback', value: { id: 'x' } }] },
+        { tag: 'img', img_key: 'k' },
+      ],
+    },
+  };
+  const text = renderCardAsText(payload);
+  assert.match(text, /标题/u);
+  assert.match(text, /粗体/u);
+  assert.ok(!text.includes('**'), 'markdown emphasis is stripped');
+  assert.ok(!text.includes('<font'), 'font tags are stripped');
+  assert.match(text, /\[按钮\]/u, 'a button becomes its label');
+  assert.match(text, /\[图片\]/u);
 });

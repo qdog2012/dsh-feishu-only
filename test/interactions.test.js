@@ -161,7 +161,11 @@ test('a question card carries every question and answers the original request', 
   const cardText = JSON.stringify(deliverCalls[0].payload);
   assert.ok(cardText.includes('发布到哪个环境'));
   assert.ok(cardText.includes('测试'));
-  assert.ok(cardText.includes('提交答案'));
+  // Answers travel as per-option callbacks; a form container is not used
+  // because the platform rejects a submit button whose behavior it does not
+  // recognise.
+  assert.ok(cardText.includes('question.answer'), 'options are answer buttons');
+  assert.ok(cardText.includes('填写文字'), 'each question offers a text path');
 
   const record = state.pendingForSession('s1')[0];
   const result = bridge.resolveQuestion({
@@ -215,8 +219,8 @@ test('approval and question cards are distinguishable by shape', async () => {
   const [approvalCard, questionCard] = deliverCalls.map((call) => call.payload);
   assert.equal(approvalCard.header.title.content, '🔐 操作审批');
   assert.equal(questionCard.header.title.content, '❓ 需要你的选择');
-  // An approval offers a decision; a question offers a submission form.
+  // An approval offers a decision; a question offers answer buttons.
   assert.ok(JSON.stringify(approvalCard).includes('允许一次'));
-  assert.ok(!JSON.stringify(approvalCard).includes('"tag":"form"'));
-  assert.ok(JSON.stringify(questionCard).includes('"tag":"form"'));
+  assert.ok(!JSON.stringify(approvalCard).includes('question.answer'));
+  assert.ok(JSON.stringify(questionCard).includes('question.answer'));
 });

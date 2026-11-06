@@ -68,6 +68,19 @@ export async function apply(ctx, rawConfig) {
   /** Why the last connection attempt failed, for `/status` and the settings page. */
   let lastError = null;
 
+  /**
+   * A small ring of recent inbound/outbound outcomes.
+   *
+   * When the bot appears to ignore a message, the useful question is "did we
+   * receive it, and did the reply fail?" — that cannot be answered from the
+   * outside, so the last few outcomes are kept and exposed through `/status`.
+   */
+  const diagnostics = [];
+  const noteDiagnostic = (entry) => {
+    diagnostics.push({ at: new Date().toISOString(), ...entry });
+    if (diagnostics.length > 12) diagnostics.shift();
+  };
+
   // ------------------------------------------------------------------ runtime
 
   /**
@@ -105,6 +118,7 @@ export async function apply(ctx, rawConfig) {
       logger,
       interactions,
       preview: previewService,
+      onDiagnostic: noteDiagnostic,
     });
 
     const ws = new FeishuLongConnection({ appId, appSecret, brand, logger });
@@ -112,6 +126,14 @@ export async function apply(ctx, rawConfig) {
 
     disposers.push(ws.on('im.message.receive_v1', async ({ event }) => {
       bridge.updateHealth({ ws: ws.state });
+      const message = event?.message;
+      noteDiagnostic({
+        kind: 'inbound',
+        chat: message?.chat_id,
+        type: message?.message_type,
+        chatType: message?.chat_type,
+        text: typeof message?.content === 'string' ? message.content.slice(0, 60) : undefined,
+      });
       await bridge.onMessage(event);
       return undefined;
     }));
@@ -359,7 +381,21 @@ export async function apply(ctx, rawConfig) {
       lastError,
       capabilities: harness.available,
       registration: registrationSnapshot(),
+      recent: [...diagnostics],
+      /** Set once a reply was rejected for out-of-scope availability. */
+      availabilityWarning: availabilityWarning(),
     };
+  }
+
+  /**
+   * Turn the recurring "bot has NO availability to this user" failure into an
+   * instruction, because the platform error alone does not say what to change.
+   */
+  function availabilityWarning() {
+    const hit = [...diagnostics].reverse().find((entry) => entry.code === 230013);
+    if (!hit) return null;
+    return '飞书拒绝向这个用户发送消息（230013）：机器人可用范围不含该账号。'
+      + '请在飞书开放平台 → 应用发布 → 版本管理与发布 → 可用范围 中加入该用户，然后发布新版本。';
   }
 
   function registrationSnapshot() {

@@ -447,6 +447,9 @@ window.__ModuleLoader__.load({
               ? h(Row, { label: t('appIdLabel'), value: status.appId, tone: 'idle' })
               : null),
           status?.lastError ? h(Alert, { kind: 'error' }, status.lastError) : null,
+          status?.availabilityWarning
+            ? h(Alert, { kind: 'error' }, status.availabilityWarning)
+            : null,
           h('div', { className: 'dfo-actions' },
             h('button', {
               className: 'dfo-btn', type: 'button', disabled: busy !== null,

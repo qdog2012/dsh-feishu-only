@@ -6,15 +6,22 @@ import {
   card,
   clampText,
   currentTaskCard,
+  emptyResultCard,
   formatDuration,
+  goalCard,
   helpCard,
+  historyCard,
+  pluginCard,
   previewCard,
   progressCard,
   questionCard,
   resultCard,
   settingsCard,
   stagedImagesCard,
+  statusCard,
   taskListCard,
+  taskSearchCard,
+  updateCard,
 } from '../lib/cards.js';
 
 /** Every button in a card, flattened out of column sets and forms. */
@@ -196,38 +203,40 @@ test('the approval card separates one-off from session scope and requires a butt
   assert.ok(!text.includes('"granted"'));
 });
 
-test('the question card groups every question into one submittable form', () => {
+test('the question card offers a callback button per option plus a text entry', () => {
+  // A `form` container cannot be used: the platform rejects a submit button
+  // whose behavior type it does not recognise, so answers travel as ordinary
+  // callbacks like every other action in this bridge.
   const payload = questionCard({
     task: { title: 't' },
     questions: [
       { id: 'q1', question: '选哪个环境？', options: [{ label: '测试' }, { label: '生产' }] },
       { id: 'q2', question: '补充说明', options: undefined },
-      { id: 'q3', question: '多选', options: [{ label: '甲' }, { label: '乙' }], multiSelect: true },
     ],
     cancelId: 'question.cancel:9',
+    pendingId: 'p1',
   });
-  const forms = [];
-  const walk = (node) => {
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) return node.forEach(walk);
-    if (node.tag === 'form') forms.push(node);
-    Object.values(node).forEach(walk);
-  };
-  walk(payload);
-  assert.equal(forms.length, 1, 'all questions submit together');
 
-  const fields = forms[0].elements.flatMap((element) => (element && typeof element === 'object' && element.name ? [element] : []));
-  const names = fields.map((field) => field.name);
-  assert.ok(names.includes('q_q1') && names.includes('c_q1'));
-  assert.ok(names.includes('c_q2'), 'a free-text question still gets an input');
-  assert.ok(names.includes('q_q3'));
-  assert.equal(fields.find((field) => field.name === 'q_q3').tag, 'multi_select_static');
-  assert.equal(fields.find((field) => field.name === 'q_q1').tag, 'select_static');
+  const ids = buttonIds(payload);
+  assert.ok(ids.includes('question.answer'), 'options are answer buttons');
+  assert.ok(ids.includes('question.freeText'), 'each question accepts free text');
+  assert.ok(ids.includes('question.cancel:9'));
+
+  const answerButtons = buttonsOf(payload)
+    .filter((button) => button.behaviors[0].value.id === 'question.answer');
+  assert.equal(answerButtons.length, 2, 'one button per option');
+  assert.deepEqual(
+    answerButtons.map((button) => button.text.content),
+    ['测试', '生产'],
+  );
+  for (const button of answerButtons) {
+    assert.equal(button.behaviors[0].value.pendingId, 'p1', 'the pending answer set is addressed');
+    assert.equal(button.behaviors[0].value.questionId, 'q1');
+  }
 
   const text = JSON.stringify(payload);
-  assert.ok(text.includes('不会作答'), 'the card warns that chatting does not answer it');
-  assert.ok(buttonIds(payload).includes('question.submit'));
-  assert.ok(buttonIds(payload).includes('question.cancel:9'));
+  assert.ok(text.includes('自由文本') || text.includes('填写文字'), 'the text path is explained');
+  assert.ok(!text.includes('"tag":"form"'), 'no form container is emitted');
 });
 
 test('the result card is independent from progress and offers a read-only refetch', () => {
@@ -278,4 +287,175 @@ test('durations read naturally', () => {
   assert.equal(formatDuration(9_000), '9s');
   assert.equal(formatDuration(127_000), '2m 07s');
   assert.equal(formatDuration(3_723_000), '1h 02m 03s');
+});
+
+// ------------------------------------------------------ schema 2.0 conformance
+
+/**
+ * The element tags Feishu schema 2.0 accepts inside `body.elements` and their
+ * nested containers.
+ *
+ * A `{ tag: 'markdown' }` element is schema 1.0 only. Emitting it made Feishu
+ * reject the entire card, so the bot sent nothing and appeared offline; that is
+ * why this is asserted for every card the bridge can produce rather than for
+ * one sample.
+ */
+const ALLOWED_TAGS = new Set([
+  'div', 'hr', 'img', 'column_set', 'column', 'button', 'form', 'input',
+  'select_static', 'multi_select_static', 'plain_text', 'lark_md', 'note', 'markdown',
+]);
+
+/** Tags that must never appear in a schema 2.0 body. */
+const FORBIDDEN_TAGS = new Set(['markdown']);
+
+function collectTags(node, found = []) {
+  if (!node || typeof node !== 'object') return found;
+  if (Array.isArray(node)) {
+    for (const item of node) collectTags(item, found);
+    return found;
+  }
+  if (typeof node.tag === 'string') found.push(node.tag);
+  for (const value of Object.values(node)) collectTags(value, found);
+  return found;
+}
+
+/** Every card the bridge can send, built with the minimum viable arguments. */
+function everyCard() {
+  return {
+    help: helpCard({ version: '1', botName: 'b' }),
+    taskList: taskListCard({
+      currentTask: { title: 't', settings: 's', status: 'idle', goal: 'g' },
+      tasks: [{ sessionId: 's1', title: 'a', isCurrent: true }],
+      page: 1, totalPages: 2, total: 11, pageKey: 'k',
+    }),
+    taskSearch: taskSearchCard({
+      keyword: 'k', results: [{ title: 'a', snippet: 's' }], page: 1, totalPages: 1, pageKey: 'k',
+    }),
+    current: currentTaskCard({
+      task: {
+        id: 's1', title: 't', project: 'p', model: 'm', reasoning: 'high',
+        permission: 'never', mode: 'normal', status: 'idle', goal: 'g', context: 'c',
+      },
+    }),
+    settings: settingsCard({
+      kind: 'model', title: 't', current: 'c',
+      options: [{ label: 'a', selected: true, value: {} }], note: 'n',
+    }),
+    plugins: pluginCard({ plugins: [{ title: 'p', description: 'd' }], skills: [{ name: 's', description: 'd' }] }),
+    history: historyCard({
+      task: { title: 't' }, pageKey: 'k', page: 1, totalPages: 1,
+      rounds: [{ time: '00:00', status: 'done', turns: [{ role: 'user', text: 'u' }, { role: 'assistant', text: 'a' }] }],
+    }),
+    goal: goalCard({
+      task: { title: 't' },
+      goal: { objective: 'o', phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 5 },
+    }),
+    staged: stagedImagesCard({ task: { title: 't' }, count: 2, files: ['2'] }),
+    progress: progressCard({
+      task: { title: 't' }, phase: 'running', turn: 1,
+      toolLines: ['a'], progress: 'p', resources: ['r'], startedAt: Date.now(),
+    }),
+    result: resultCard({ task: { title: 't' }, text: 'answer', resources: ['r'], turn: 1 }),
+    emptyResult: emptyResultCard({ task: { title: 't' }, reason: 'none' }),
+    approval: approvalCard({
+      task: { title: 't' }, toolName: 'bash', reason: 'r', detail: 'd',
+      scopeNote: 's', allowOnceId: 'a1', rejectId: 'r1', expiresAt: Date.now(),
+    }),
+    question: questionCard({
+      task: { title: 't' },
+      questions: [
+        { id: 'q1', question: '?', options: [{ label: 'a' }, { label: 'b' }] },
+        { id: 'q2', question: '?', multiSelect: true, options: [{ label: 'a' }] },
+      ],
+      cancelId: 'c',
+      pendingId: 'p1',
+    }),
+    preview: previewCard({ title: 't', description: 'd', imageKey: 'k', downloadId: 'x', note: 'n' }),
+    update: updateCard({ currentVersion: '1', targetVersion: '2', state: 's', confirmId: 'c' }),
+    status: statusCard({ bot: 'b', ws: 'w', tasks: 't', execution: 'e' }),
+  };
+}
+
+test('no card uses an element tag outside schema 2.0', () => {
+  for (const [name, payload] of Object.entries(everyCard())) {
+    for (const tag of collectTags(payload)) {
+      assert.ok(ALLOWED_TAGS.has(tag), `${name}: unknown element tag "${tag}"`);
+      assert.ok(!FORBIDDEN_TAGS.has(tag), `${name}: schema 1.0 tag "${tag}" would fail the send`);
+    }
+  }
+});
+
+test('every card is a well-formed schema 2.0 document', () => {
+  for (const [name, payload] of Object.entries(everyCard())) {
+    assert.equal(payload.schema, '2.0', `${name}: schema`);
+    assert.ok(payload.body && Array.isArray(payload.body.elements), `${name}: body.elements`);
+    assert.ok(payload.body.elements.length > 0, `${name}: the body is not empty`);
+    if (payload.header) {
+      assert.equal(payload.header.title.tag, 'plain_text', `${name}: header title tag`);
+      assert.ok(payload.header.template, `${name}: header template`);
+    }
+  }
+});
+
+test('rich text is always a div wrapping lark_md', () => {
+  for (const [name, payload] of Object.entries(everyCard())) {
+    const texts = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node.tag === 'div' && node.text) texts.push(node.text.tag);
+      Object.values(node).forEach(walk);
+    };
+    walk(payload);
+    for (const tag of texts) {
+      assert.ok(tag === 'lark_md' || tag === 'plain_text', `${name}: div text tag was "${tag}"`);
+    }
+  }
+});
+
+test('buttons carry a callback behavior the dispatcher can route', () => {
+  for (const [name, payload] of Object.entries(everyCard())) {
+    for (const button of buttonsOf(payload)) {
+      assert.ok(Array.isArray(button.behaviors), `${name}: button has no behaviors`);
+      assert.equal(button.behaviors[0].type, 'callback', `${name}: button is not a callback`);
+      assert.ok(button.behaviors[0].value, `${name}: button has no value`);
+      assert.equal(typeof button.text.content, 'string', `${name}: button has no label`);
+    }
+  }
+});
+
+test('every column declares a weighted width', () => {
+  // Schema 2.0 rejects a column without `width: 'weighted'` + `weight` with
+  // "invalid width", which failed every card containing a button row.
+  for (const [name, payload] of Object.entries(everyCard())) {
+    const columns = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node.tag === 'column') columns.push(node);
+      Object.values(node).forEach(walk);
+    };
+    walk(payload);
+    for (const column of columns) {
+      assert.equal(column.width, 'weighted', `${name}: column width`);
+      assert.equal(typeof column.weight, 'number', `${name}: column weight`);
+    }
+  }
+});
+
+test('a confirmation dialog uses plain_text objects on both fields', () => {
+  // A bare string on either field makes the platform fail to unmarshal the
+  // card ("failed to unmarshal for PlainText").
+  const payload = goalCard({
+    task: { title: 't' },
+    goal: { objective: 'o', phase: 'active', activation: 'armed', roundsStarted: 0, maxGoalRounds: 3 },
+  });
+  const withConfirm = buttonsOf(payload).filter((button) => button.confirm);
+  assert.ok(withConfirm.length > 0, 'the destructive action asks for confirmation');
+  for (const button of withConfirm) {
+    assert.equal(button.confirm.title.tag, 'plain_text');
+    assert.equal(typeof button.confirm.title.content, 'string');
+    assert.equal(button.confirm.text.tag, 'plain_text');
+    assert.equal(typeof button.confirm.text.content, 'string');
+  }
 });
