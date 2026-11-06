@@ -250,3 +250,45 @@ test('visible text is joined and reasoning is excluded', () => {
   ];
   assert.equal(textFromContent(content), '第一行\n第二行');
 });
+test('a tool result contributes its output, not just its name', () => {
+  // Progress used to say \"执行命令 完成\" and nothing else: the card told you
+  // which tool ran but never what it printed.
+  const tracker = new RoundTracker({ taskId: 's1' });
+  tracker.consume([
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    { type: 'tool/call', seq: 2, data: { turn: 1, name: 'pwsh', callId: 'c1' } },
+    {
+      type: 'tool/result',
+      seq: 3,
+      data: { turn: 1, message: { role: 'tool', toolCallId: 'c1', content: [
+        { type: 'text', text: 'total 42\nbuild succeeded' },
+      ] } },
+    },
+  ]);
+  assert.ok(tracker.commandOutput, 'the output was captured');
+  assert.equal(tracker.commandOutput.tool, '执行命令');
+  assert.match(tracker.commandOutput.text, /build succeeded/u);
+  assert.equal(tracker.commandOutput.error, false);
+});
+
+test('a failed tool records the error as its output', () => {
+  const tracker = new RoundTracker({ taskId: 's1' });
+  tracker.consume([
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    { type: 'tool/call', seq: 2, data: { turn: 1, name: 'pwsh', callId: 'c2' } },
+    { type: 'tool/result', seq: 3, data: { turn: 1, callId: 'c2', error: { reason: 'command not found' } } },
+  ]);
+  assert.ok(tracker.commandOutput);
+  assert.equal(tracker.commandOutput.error, true);
+  assert.match(tracker.commandOutput.text, /command not found/u);
+});
+
+test('toolOutputText reads every shape a result can arrive in', async () => {
+  const { toolOutputText } = await import('../lib/round.js');
+  assert.equal(toolOutputText({ message: { content: [{ type: 'text', text: 'a' }] } }), 'a');
+  assert.equal(toolOutputText({ error: 'plain string' }), 'plain string');
+  assert.equal(toolOutputText({ error: { message: 'msg' } }), 'msg');
+  assert.equal(toolOutputText({ output: 'direct' }), 'direct');
+  assert.equal(toolOutputText({}), '');
+  assert.equal(toolOutputText(null), '');
+});
