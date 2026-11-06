@@ -87,6 +87,14 @@ export async function apply(ctx, rawConfig) {
   let lastError = null;
   /** Outcome of the last slash-menu reconcile, surfaced through `/status`. */
   let menuReport = null;
+  /**
+   * Whether a usable secret exists in the store.
+   *
+   * Reported separately from `runtime` on purpose: "connected" and "a secret is
+   * stored" are different facts, and conflating them made a stored-but-unused
+   * secret look missing.
+   */
+  let secretOnDisk = null;
 
   /**
    * A small ring of recent inbound/outbound outcomes.
@@ -269,14 +277,27 @@ export async function apply(ctx, rawConfig) {
     const startupConfig = { appId: config.appId, brand: config.brand };
     void (async () => {
       try {
+        const inline = Boolean(config.appSecret);
         const secret = config.appSecret || await readStoredSecret(ctx, startupConfig.appId);
+        noteDiagnostic({
+          kind: 'startup',
+          appId: startupConfig.appId || null,
+          inlineSecret: inline,
+          secretFound: Boolean(secret),
+        });
         if (!startupConfig.appId || !secret) {
           logger.warn?.('[feishu] the bridge is enabled but has no App ID/Secret; open the settings page to connect a bot');
           return;
         }
         await startRuntime({ appId: startupConfig.appId, appSecret: secret, brand: startupConfig.brand });
+        noteDiagnostic({ kind: 'startup-connected', appId: startupConfig.appId });
       } catch (error) {
         lastError = lastError ?? `启动连接失败：${error?.message ?? error}`;
+        noteDiagnostic({
+          kind: 'startup-failed',
+          appId: startupConfig.appId || null,
+          error: String(error?.message ?? error).slice(0, 300),
+        });
         logger.warn?.(`[feishu] startup connect failed (the plugin stays loaded): ${error?.message ?? error}`);
       }
     })();
@@ -314,7 +335,19 @@ export async function apply(ctx, rawConfig) {
     routeDisposers.push(webServer.register({
       kind: 'exact',
       path: `${base}/status`,
-      resource: async () => json(buildStatus()),
+      resource: async () => {
+        // Ask the store rather than trusting the last known value: a secret may
+        // have been added or removed while this process was running, and
+        // `secretConfigured` must describe the store now.
+        if (config.appId) {
+          try {
+            secretOnDisk = Boolean(await readStoredSecret(ctx, config.appId));
+          } catch {
+            secretOnDisk = null;
+          }
+        }
+        return json(buildStatus());
+      },
     }));
 
     routeDisposers.push(webServer.register({
@@ -490,7 +523,7 @@ export async function apply(ctx, rawConfig) {
       enabled: config.enabled,
       connected: Boolean(runtime),
       appId: mask(config.appId),
-      secretConfigured: Boolean(config.appSecret) || Boolean(runtime),
+      secretConfigured: Boolean(config.appSecret) || Boolean(runtime) || secretOnDisk,
       brand: config.brand,
       bot: botInfo
         ? {
