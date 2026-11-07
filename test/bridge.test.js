@@ -390,14 +390,36 @@ test('a redelivered platform message runs only once', async () => {
   assert.equal(harness.prompts.length, 1);
 });
 
-test('a running task refuses supplementary input when configured to', async () => {
+test('a message sent during a running turn is appended as a supplement', async () => {
+  // Rejecting made the bot feel deaf: a follow-up sent while it worked was
+  // thrown away. It now joins the turn in progress via `steer`.
   const harness = new FakeHarness();
   harness.taskState = async () => ({ ok: true, value: { running: true, pendingInput: [] } });
   const { bridge, api, state } = makeBridge({ harness });
   state.setCurrentTask('ou_user', { sessionId: 's1', label: '运行中的任务' });
   await bridge.onMessage(messageEvent('补充一句'));
-  assert.equal(harness.prompts.length, 0);
-  assert.match(JSON.stringify(api.lastCard), /正在执行/u);
+
+  assert.equal(harness.prompts.length, 1, 'the message was submitted, not dropped');
+  assert.equal(harness.prompts[0].options.mode, 'steer', 'and steered into the live turn');
+  assert.equal(harness.prompts[0].content.at(-1).text, '补充一句');
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /已追加为补充输入/u);
+  assert.match(card, /补充一句/u);
+});
+
+test('an image batch during a running turn is not split into a steer', async () => {
+  // Images are staged and submitted as one batch; steering would break the
+  // batch, so those must take the normal path instead.
+  const harness = new FakeHarness();
+  harness.taskState = async () => ({ ok: true, value: { running: true, pendingInput: [] } });
+  const { bridge, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  const event = messageEvent('', { messageId: 'om_img2' });
+  event.message.message_type = 'image';
+  event.message.content = JSON.stringify({ image_key: 'img_1' });
+  await bridge.onMessage(event);
+  const modes = harness.prompts.map((p) => p.options?.mode);
+  assert.ok(!modes.includes('steer'), 'an image batch is never steered');
 });
 
 test('images alone are staged, then submitted together with the next text', async () => {
@@ -795,4 +817,50 @@ test('an empty new-task submission creates nothing', async () => {
     context: { open_message_id: 'om_3', open_chat_id: 'oc_1' },
   });
   assert.equal(state.currentTask('ou_user'), null, 'a blank title does not create a task');
+});
+test('/task search without a keyword asks in a form, not a syntax line', async () => {
+  const { bridge, api, state } = makeBridge();
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/task search'));
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /"tag":"form"/u, "a form is shown");
+  assert.match(card, /task\.search\.submit/u, "and it submits a search");
+  assert.ok(!card.includes("请提供搜索关键词"), "no syntax instruction");
+});
+
+test('submitting the search form runs the search', async () => {
+  const { bridge, api, state } = makeBridge();
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', form_value: { value: '重构' }, value: { id: 'task.search.submit' } },
+    context: { open_message_id: 'om_s', open_chat_id: 'oc_1' },
+  });
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /重构/u, "the keyword reached the search");
+});
+
+test('an unusable setting argument shows the chooser instead of usage text', async () => {
+  // "/model 5" on a fresh process (no snapshot) must offer the list, not
+  // explain the accepted syntax.
+  const { bridge, api, state } = makeBridge();
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/mode 9'));
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /工作模式/u, "the mode chooser is shown");
+  assert.ok(!card.includes("只接受序号"), "no syntax instruction");
+});
+
+test('/goal without an argument asks for the goal in a form', async () => {
+  const { bridge, api, state } = makeBridge();
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/goal'));
+  // "/goal" alone means show the current goal.
+  const shown = JSON.stringify(api.lastCard);
+  assert.match(shown, /目标/u);
+  // "/goal set" with no text asks for it.
+  await bridge.onMessage(messageEvent('/goal set'));
+  const asked = JSON.stringify(api.lastCard);
+  assert.match(asked, /"tag":"form"/u, "a form asks for the goal");
+  assert.match(asked, /goal\.set\.submit/u);
 });
