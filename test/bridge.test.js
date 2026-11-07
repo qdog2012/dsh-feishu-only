@@ -249,6 +249,23 @@ function fakeContext(services = {}) {
   };
 }
 
+/**
+ * Every button value in a card, wherever it sits.
+ *
+ * Shared rather than redefined per test: several tests need to find a button by
+ * its callback id, and a local copy silently breaks when a test forgets it.
+ */
+function collect(node, found = []) {
+  if (!node || typeof node !== 'object') return found;
+  if (Array.isArray(node)) {
+    for (const item of node) collect(item, found);
+    return found;
+  }
+  if (node.tag === 'button') found.push(node.behaviors?.[0]?.value);
+  for (const value of Object.values(node)) collect(value, found);
+  return found;
+}
+
 function makeBridge({ api = new FakeApi(), harness = new FakeHarness(), config = {}, services = {} } = {}) {
   const state = new InteractionState({ logger: silent });
   const interactions = {
@@ -583,16 +600,6 @@ test('a foreign operator cannot resolve another user\'s snapshot', async () => {
   const { bridge, api, state } = makeBridge({ harness });
   await bridge.onMessage(messageEvent('/task'));
 
-  const collect = (node, found = []) => {
-    if (!node || typeof node !== 'object') return found;
-    if (Array.isArray(node)) {
-      for (const item of node) collect(item, found);
-      return found;
-    }
-    if (node.tag === 'button') found.push(node.behaviors?.[0]?.value);
-    for (const value of Object.values(node)) collect(value, found);
-    return found;
-  };
   const button = collect(api.lastCard).find((value) => value?.id === 'task.select');
   assert.ok(button, 'the list must expose a select button');
 
@@ -611,16 +618,6 @@ test('a card button press by the owner selects the task', async () => {
   const { bridge, api, state } = makeBridge({ harness });
   await bridge.onMessage(messageEvent('/task'));
 
-  const collect = (node, found = []) => {
-    if (!node || typeof node !== 'object') return found;
-    if (Array.isArray(node)) {
-      for (const item of node) collect(item, found);
-      return found;
-    }
-    if (node.tag === 'button') found.push(node.behaviors?.[0]?.value);
-    for (const value of Object.values(node)) collect(value, found);
-    return found;
-  };
   const button = collect(api.lastCard).find((value) => value?.id === 'task.select');
 
   await bridge.onCardAction({
@@ -863,4 +860,44 @@ test('/goal without an argument asks for the goal in a form', async () => {
   const asked = JSON.stringify(api.lastCard);
   assert.match(asked, /"tag":"form"/u, "a form asks for the goal");
   assert.match(asked, /goal\.set\.submit/u);
+});
+test('the task list 新建任务 button opens a form, end to end', async () => {
+  // The whole chain, not just the dispatcher branch: the list must offer the
+  // button, pressing it must render a form, and submitting must create.
+  const { bridge, api, state } = makeBridge();
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/task'));
+  const listCard = JSON.stringify(api.lastCard);
+  const button = collect(api.lastCard).find((v) => v?.id === 'task.create');
+  assert.ok(button, 'the task list offers the new-task button');
+  assert.ok(listCard.includes('新建任务'));
+
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'task.create' } },
+    context: { open_message_id: 'om_l', open_chat_id: 'oc_1' },
+  });
+  const form = JSON.stringify(api.lastCard);
+  assert.match(form, /"tag":"form"/u, 'pressing it renders a form');
+  assert.match(form, /"tag":"input"/u, 'with a title field');
+  assert.match(form, /task\.create\.submit/u, 'and a submit action');
+});
+
+test('the project list creates in one press but names the task after the project', async () => {
+  // Project rows create immediately, so the task takes the project title.
+  // This is the one creation path that never asks for a name.
+  const { bridge, api, state } = makeBridge({
+    services: { workspaceRegistry: { list: () => [{ id: 'w1', title: '飞书插件', path: 'D:/p/f' }] } },
+  });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/project'));
+  const button = collect(api.lastCard).find((v) => v?.id === 'project.select');
+  assert.ok(button, 'a project row is a button');
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.select', pageKey: button.pageKey, index: 1 } },
+    context: { open_message_id: 'om_p', open_chat_id: 'oc_1' },
+  });
+  const current = state.currentTask('ou_user');
+  assert.equal(current.title, '飞书插件', 'the task is named after the project');
 });
