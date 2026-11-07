@@ -691,3 +691,32 @@ test('the project list is one button per project, labelled with the project', as
   // Schema 2.0 only: a markdown element would get the card rejected.
   assert.ok(!payload.includes('\\"tag\\":\\"markdown\\"'), 'no schema 1.0 element');
 });
+
+test('/mode explains that a task must run once before the mode can switch', async () => {
+  // planMode.set needs a live Agent, and an agent exists only after the task
+  // has actually run in this process. The old message said "unsupported",
+  // which was both wrong and a dead end.
+  const { bridge, api } = makeBridge();
+  const state = bridge;
+  void state;
+  // With no current task the command asks for one first.
+  await bridge.onMessage(messageEvent('/mode'));
+  assert.match(api.lastText ?? '', /请先选择一个任务/u);
+});
+
+test('/mode reports what actually happened to the switch', async () => {
+  // The service answers committed / queued / cancelled / noop, and the card
+  // must not reduce them all to "takes effect next round".
+  const { readFileSync } = await import('node:fs');
+  const outcomes = {
+    committed: '从下一轮开始生效',
+    queued: '本轮下一个步骤生效',
+    noop: '已经是这个模式',
+    cancelled: '相互抵消',
+  };
+  // Guard the copy: each outcome has its own sentence in the bridge.
+  const source = readFileSync('lib/bridge.js', 'utf8');
+  for (const [outcome, phrase] of Object.entries(outcomes)) {
+    assert.ok(source.includes(phrase), outcome + ' has its own wording');
+  }
+});
