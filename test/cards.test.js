@@ -330,6 +330,43 @@ test('the progress card never claims completion for a failed round', () => {
   assert.ok(JSON.stringify(payload).includes('模型返回错误'));
 });
 
+test('a finished round offers no buttons at all', () => {
+  // Once the round is over, 停止 can only answer "already finished" and 历史
+  // belongs to the result card that follows. Both are noise on a settled card.
+  for (const phase of ['done', 'failed', 'stopped']) {
+    const payload = progressCard({
+      task: { title: 'x' },
+      phase,
+      toolLines: ['执行命令 完成'],
+      progress: '',
+      resources: [],
+      startedAt: Date.now() - 1000,
+    });
+    const ids = buttonIds(payload);
+    assert.ok(!ids.includes('round.stop'), `${phase}: no stop button`);
+    assert.ok(!ids.includes('history.show'), `${phase}: no history button`);
+    assert.equal(ids.length, 0, `${phase}: no action row at all`);
+    // The phase itself is still reported.
+    assert.ok(JSON.stringify(payload).includes('任务'), `${phase}: the card still describes the round`);
+  }
+});
+
+test('a running round still offers stop and history', () => {
+  for (const phase of ['starting', 'running', 'waiting', 'retrying']) {
+    const payload = progressCard({
+      task: { title: 'x' },
+      phase,
+      toolLines: [],
+      progress: 'p',
+      resources: [],
+      startedAt: Date.now(),
+    });
+    const ids = buttonIds(payload);
+    assert.ok(ids.includes('round.stop'), `${phase}: stop is available`);
+    assert.ok(ids.includes('history.show'), `${phase}: history is available`);
+  }
+});
+
 test('the approval card separates one-off from session scope and requires a button press', () => {
   const payload = approvalCard({
     task: { title: 't' },
