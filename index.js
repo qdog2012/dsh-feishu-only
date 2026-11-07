@@ -108,7 +108,6 @@ export async function apply(ctx, rawConfig) {
         sessionId: task.sessionId,
         label: task.label ?? null,
         cwd: task.cwd ?? null,
-        chatId: task.chatId ?? null,
       };
     }
     // Serialized so two quick selections cannot interleave into a half-written
@@ -135,7 +134,6 @@ export async function apply(ctx, rawConfig) {
           sessionId: entry.sessionId,
           label: typeof entry.label === 'string' ? entry.label : null,
           cwd: typeof entry.cwd === 'string' ? entry.cwd : null,
-          chatId: typeof entry.chatId === 'string' ? entry.chatId : null,
         });
         restored += 1;
       }
