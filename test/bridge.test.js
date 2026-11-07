@@ -753,3 +753,46 @@ test('/mode shows a pending switch on the card', async () => {
   await bridge.onMessage(messageEvent('/mode'));
   assert.match(JSON.stringify(api.lastCard), /排队/u);
 });
+test('the new-task button opens a form instead of telling the user to type', async () => {
+  // The button used to reply "send /task create <title>", which is exactly the
+  // command the button was meant to replace.
+  const { bridge, api } = makeBridge();
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'task.create' } },
+    context: { open_message_id: 'om_1', open_chat_id: 'oc_1' },
+  });
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /"tag":"form"/u);
+  assert.match(card, /"tag":"input"/u);
+  assert.ok(!card.includes("/task create"), "the card must not instruct a command");
+});
+
+test('submitting the new-task form creates and selects the task', async () => {
+  const { bridge, api, state } = makeBridge();
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      form_value: { title: '修复登录超时' },
+      value: { id: 'task.create.submit' },
+    },
+    context: { open_message_id: 'om_2', open_chat_id: 'oc_1' },
+  });
+  const current = state.currentTask('ou_user');
+  assert.ok(current, 'a task became current');
+  assert.equal(current.title, '修复登录超时', 'the typed title is used');
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /已创建任务/u);
+  assert.match(card, /修复登录超时/u);
+});
+
+test('an empty new-task submission creates nothing', async () => {
+  const { bridge, state } = makeBridge();
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', form_value: { title: '   ' }, value: { id: 'task.create.submit' } },
+    context: { open_message_id: 'om_3', open_chat_id: 'oc_1' },
+  });
+  assert.equal(state.currentTask('ou_user'), null, 'a blank title does not create a task');
+});
