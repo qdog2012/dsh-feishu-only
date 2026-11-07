@@ -799,8 +799,11 @@ export async function apply(ctx, rawConfig) {
     if (registration && registration.state !== REGISTRATION_STATE.SUCCEEDED) registration.cancel();
     const session = new RegistrationSession({
       brand: config.brand,
+      // The confirm page reads the name and description from the QR URL, which
+      // is why both are passed here rather than only into `addons`.
       appName: config.botName,
-      addons: bridgeAddons(),
+      appDescription: config.botDescription,
+      addons: bridgeAddons({ appName: config.botName, appDescription: config.botDescription }),
       source: 'dsh-feishu-only',
       logger,
     });
