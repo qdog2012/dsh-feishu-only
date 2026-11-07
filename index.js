@@ -23,7 +23,7 @@ import { FeishuApi } from './lib/feishu/api.js';
 import { FeishuLongConnection, WS_STATE } from './lib/feishu/ws.js';
 import { RegistrationSession, REGISTRATION_STATE, bridgeAddons } from './lib/feishu/registration.js';
 import { InteractionState } from './lib/state.js';
-import { HarnessAdapter } from './lib/harness.js';
+import { HarnessAdapter, HarnessTask } from './lib/harness.js';
 import { InteractionBridge } from './lib/interactions.js';
 import { FeishuBridge } from './lib/bridge.js';
 import { PreviewService } from './lib/preview.js';
@@ -130,11 +130,18 @@ export async function apply(ctx, rawConfig) {
       let restored = 0;
       for (const [userId, entry] of Object.entries(parsed?.selections ?? {})) {
         if (!userId || typeof entry?.sessionId !== 'string' || !entry.sessionId) continue;
-        state.restoreCurrentTask(userId, {
+        // A real HarnessTask, not a plain object: the bridge calls task.touch()
+        // and reads task.label on the first message, and a literal has neither.
+        // Restoring the wrong shape here surfaced later as
+        // "task.touch is not a function" on an otherwise ordinary message.
+        const task = new HarnessTask({
           sessionId: entry.sessionId,
-          label: typeof entry.label === 'string' ? entry.label : null,
+          title: typeof entry.label === 'string' ? entry.label : null,
           cwd: typeof entry.cwd === 'string' ? entry.cwd : null,
         });
+        // Nothing is known about its activity yet; the first message refreshes it.
+        task.blank = true;
+        state.restoreCurrentTask(userId, task);
         restored += 1;
       }
       if (restored > 0) logger.debug?.(`[feishu] restored ${restored} task selection(s)`);

@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply } from '../index.js';
+import { HarnessTask } from '../lib/harness.js';
 import { InteractionState } from '../lib/state.js';
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
@@ -174,9 +175,28 @@ test('restoring a selection does not announce it', () => {
   // chose something, or every launch would fire a "switched task" notice.
   const writes = [];
   const state = new InteractionState({ logger: silent, onCurrentTaskChange: (u, t) => writes.push({ u, t }) });
-  state.restoreCurrentTask('ou_user', { sessionId: 's1' });
+  state.restoreCurrentTask('ou_user', new HarnessTask({ sessionId: 's1', title: '任务' }));
   assert.equal(writes.length, 0, 'restore stayed silent');
   assert.equal(state.currentTask('ou_user').sessionId, 's1', 'but the task is selected');
+});
+
+test('restoring a plain literal is refused, because the bridge needs a task', () => {
+  // This is the bug that surfaced as "task.touch is not a function" on an
+  // ordinary message after a restart: the persisted record is a plain object,
+  // and the bridge calls task.touch() and reads task.label.
+  const warnings = [];
+  const logger = { ...silent, warn: (m) => warnings.push(String(m)) };
+  const state = new InteractionState({ logger });
+  const restored = state.restoreCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  assert.equal(restored, null, 'the literal was rejected');
+  assert.equal(state.currentTask('ou_user'), null, 'nothing was stored');
+  assert.ok(warnings.some((m) => /not a task instance/u.test(m)), 'and it was reported');
+
+  // The real shape is accepted.
+  const task = new HarnessTask({ sessionId: 's1', title: '任务' });
+  assert.equal(state.restoreCurrentTask('ou_user', task).sessionId, 's1');
+  assert.equal(typeof state.currentTask('ou_user').touch, 'function', 'the restored task has touch()');
+  assert.equal(state.currentTask('ou_user').label, '任务', 'and a label');
 });
 
 test('clearing the selection is persisted too', () => {
