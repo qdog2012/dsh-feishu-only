@@ -78,7 +78,77 @@ export async function apply(ctx, rawConfig) {
     config.problems = Object.freeze([...config.problems]);
   }
 
-  const state = new InteractionState({ logger });
+  /**
+   * Where the task each user last selected is remembered.
+   *
+   * Without this a restart forgot the selection, so the next message had
+   * nowhere to go and the user had to pick a task again — the one piece of
+   * bridge state that is genuinely a user preference rather than a live fact.
+   */
+  const selectionFile = () => {
+    try {
+      const home = ctx.get?.('homePaths')?.homeDir
+        ?? process.env.DSH_HOME
+        ?? join(homedir(), '.dsh');
+      return join(home, 'feishu-only.selection.json');
+    } catch {
+      return null;
+    }
+  };
+
+  /** Write the current selections. Debounced by the caller's rarity. */
+  let selectionWrite = Promise.resolve();
+  const persistSelection = () => {
+    const file = selectionFile();
+    if (!file) return;
+    const entries = {};
+    for (const { userId, task } of state.currentTaskEntries()) {
+      if (!userId || !task?.sessionId) continue;
+      entries[userId] = {
+        sessionId: task.sessionId,
+        label: task.label ?? null,
+        cwd: task.cwd ?? null,
+        chatId: task.chatId ?? null,
+      };
+    }
+    // Serialized so two quick selections cannot interleave into a half-written
+    // file; each write carries the full map anyway.
+    selectionWrite = selectionWrite
+      .then(async () => {
+        await mkdir(dirname(file), { recursive: true });
+        await writeFile(file, JSON.stringify({ version: 1, selections: entries }, null, 2), 'utf8');
+      })
+      .catch((error) => {
+        logger.warn?.(`[feishu] could not save the task selection: ${error?.message ?? error}`);
+      });
+  };
+
+  async function loadSelection() {
+    const file = selectionFile();
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8'));
+      let restored = 0;
+      for (const [userId, entry] of Object.entries(parsed?.selections ?? {})) {
+        if (!userId || typeof entry?.sessionId !== 'string' || !entry.sessionId) continue;
+        state.restoreCurrentTask(userId, {
+          sessionId: entry.sessionId,
+          label: typeof entry.label === 'string' ? entry.label : null,
+          cwd: typeof entry.cwd === 'string' ? entry.cwd : null,
+          chatId: typeof entry.chatId === 'string' ? entry.chatId : null,
+        });
+        restored += 1;
+      }
+      if (restored > 0) logger.debug?.(`[feishu] restored ${restored} task selection(s)`);
+    } catch (error) {
+      // A missing or unreadable file only means the user picks a task again.
+      if (error?.code !== 'ENOENT') {
+        logger.warn?.(`[feishu] could not read the task selection: ${error?.message ?? error}`);
+      }
+    }
+  }
+
+  const state = new InteractionState({ logger, onCurrentTaskChange: () => persistSelection() });
   const harness = new HarnessAdapter({ ctx, logger });
 
   /** The live connection bundle, created once credentials are usable. */
@@ -379,6 +449,10 @@ export async function apply(ctx, rawConfig) {
   }
 
   // -------------------------------------------------------------- bootstrapping
+
+  // Restore the remembered selection regardless of `enabled`: it is what the next
+  // message needs, and the settings page should show the same state.
+  void loadSelection();
 
   if (config.enabled) {
     // Connecting is started, never awaited: awaiting it made plugin loading
