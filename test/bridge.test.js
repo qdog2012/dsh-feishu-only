@@ -71,6 +71,33 @@ class FakeApi {
 
 /** A recording stand-in for the Host capabilities. */
 class FakeHarness {
+  /**
+   * Directory browsing and project creation.
+   *
+   * The real adapter reads `directoryPicker` and `workspaceRegistry` from the
+   * context; the fake holds them directly so a test states what the deployment
+   * can do rather than what the adapter does with it.
+   */
+  directoryListing = null;
+  browsedPaths = [];
+  createdProjects = [];
+
+  async browseDirectory(path) {
+    this.browsedPaths.push(path ?? null);
+    if (!this.directoryListing) {
+      return { ok: false, reason: '当前部署没有提供目录浏览能力。' };
+    }
+    const listing = typeof this.directoryListing === 'function'
+      ? this.directoryListing(path)
+      : this.directoryListing;
+    return { ok: true, value: listing };
+  }
+
+  async createProject(path, title) {
+    this.createdProjects.push({ path, title });
+    if (this.projectCreateFails) return { ok: false, reason: this.projectCreateFails };
+    return { ok: true, value: { id: 'w1', path, title } };
+  }
   available = {
     agents: true,
     sessions: true,
@@ -901,3 +928,109 @@ test('the project list creates in one press but names the task after the project
   const current = state.currentTask('ou_user');
   assert.equal(current.title, '飞书插件', 'the task is named after the project');
 });
+test('新建项目 starts by picking a path, then asks for a name', async () => {
+  // Two steps, in this order: the directory is chosen among real directories,
+  // the name is free text. Asking both at once would mean typing a path from
+  // memory.
+  const harness = new FakeHarness();
+  harness.directoryListing = {
+    path: 'D:/work',
+    home: 'D:/work',
+    crumbs: [],
+    entries: [{ name: 'dsh-feishu-only', path: 'D:/work/dsh-feishu-only', hidden: false }],
+    truncated: false,
+  };
+  const { bridge, api, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/project'));
+  const create = collect(api.lastCard).find((v) => v?.id === 'project.create');
+  assert.ok(create, 'the project list offers 新建项目');
+
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_c', open_chat_id: 'oc_1' },
+  });
+  const picker = JSON.stringify(api.lastCard);
+  assert.match(picker, /选择路径/u, 'the path picker is shown first');
+  assert.match(picker, /dsh-feishu-only/u, 'and lists real subdirectories');
+
+  // Choosing the current directory proceeds to the name form.
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.dir.pick', path: 'D:/work' } },
+    context: { open_message_id: 'om_d', open_chat_id: 'oc_1' },
+  });
+  const naming = JSON.stringify(api.lastCard);
+  assert.match(naming, /"tag":"form"/u, 'the name form is shown second');
+  assert.match(naming, /project\.create\.submit/u, 'and it submits a project');
+  assert.match(naming, /项目名称/u, 'asking for the project name');
+});
+
+test('choosing a subdirectory browses into it instead of using it', async () => {
+  // Entering a directory is usually how you reach the one you want, so a
+  // subdirectory button must navigate, not commit.
+  const harness = new FakeHarness();
+  harness.directoryListing = (path) => ({
+    path: path ?? 'D:/work',
+    home: 'D:/work',
+    crumbs: [],
+    entries: path === 'D:/work/dsh-feishu-only'
+      ? []
+      : [{ name: 'dsh-feishu-only', path: 'D:/work/dsh-feishu-only', hidden: false }],
+    truncated: false,
+  });
+  const { bridge, api, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_e', open_chat_id: 'oc_1' },
+  });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.dir', path: 'D:/work/dsh-feishu-only' } },
+    context: { open_message_id: 'om_f', open_chat_id: 'oc_1' },
+  });
+  assert.ok(harness.browsedPaths.includes('D:/work/dsh-feishu-only'), 'the subdirectory was listed');
+  const card = JSON.stringify(api.lastCard);
+  assert.match(card, /选择路径/u, 'still picking, not naming');
+  assert.match(card, /没有子目录/u, 'and the empty level is stated');
+});
+
+test('creating a project also opens its first task', async () => {
+  // A registered project with nowhere to type is not useful; the same press
+  // opens the task that will run in it.
+  const harness = new FakeHarness();
+  const { bridge, api, state } = makeBridge({ harness });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.create.submit', path: 'D:/work/new' },
+      form_value: { title: '新项目' },
+    },
+    context: { open_message_id: 'om_g', open_chat_id: 'oc_1' },
+  });
+  assert.equal(harness.createdProjects.length, 1, 'the project was registered');
+  assert.equal(harness.createdProjects[0].path, 'D:/work/new');
+  assert.equal(harness.createdProjects[0].title, '新项目');
+  const current = state.currentTask('ou_user');
+  assert.ok(current, 'a task became current');
+  assert.equal(current.title, '新项目', 'named after the project');
+  assert.match(JSON.stringify(api.lastCard), /项目已创建/u);
+});
+
+test('a missing directory picker is reported, not silently ignored', async () => {
+  // The browse picker is a plugin; a deployment without it must say so.
+  const harness = new FakeHarness();
+  const { bridge, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  const toast = await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_h', open_chat_id: 'oc_1' },
+  });
+  assert.match(JSON.stringify(toast ?? {}), /目录浏览/u, 'the reason is stated');
+});
+
