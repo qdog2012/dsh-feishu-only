@@ -96,9 +96,13 @@ class FakeHarness {
   sessionEvents = [];
   /** The reply `/last` returns; tests replace it per case. */
   lastReplyValue = { ok: true, value: null };
+  /** Whether a live agent exists; false models a task that has never run. */
+  agentAvailable = true;
 
   agent(sessionId) {
-    return { id: sessionId };
+    // A task that has never run in this process has no live agent; tests that
+    // exercise that set `agentAvailable = false`.
+    return this.agentAvailable === false ? null : { id: sessionId };
   }
 
   session(sessionId) {
@@ -719,4 +723,33 @@ test('/mode reports what actually happened to the switch', async () => {
   for (const [outcome, phrase] of Object.entries(outcomes)) {
     assert.ok(source.includes(phrase), outcome + ' has its own wording');
   }
+});
+
+test('/mode reports an unknown state instead of guessing 普通模式', async () => {
+  // planMode.get needs a live Agent, which a task that has never run has not.
+  // The card used to mark 普通模式 selected in that case - a guess.
+  const harness = new FakeHarness();
+  harness.agentAvailable = false;
+  const { bridge, api, state } = makeBridge({
+    harness,
+    services: { planMode: { get: () => ({ active: false }), set: () => 'committed' } },
+  });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/mode'));
+  const text = JSON.stringify(api.lastCard);
+  assert.match(text, /未知（任务还没执行过）/u);
+  // Neither option may be marked current when the state is unknown.
+  assert.doesNotMatch(text, /普通模式[^*"]*✅/u);
+});
+
+test('/mode shows a pending switch on the card', async () => {
+  // planMode.set can answer "queued": the new state is selected but not yet in
+  // effect. Reporting only active would show the old state as if nothing had
+  // happened.
+  const { bridge, api, state } = makeBridge({
+    services: { planMode: { get: () => ({ active: false, pending: true }), set: () => 'queued' } },
+  });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onMessage(messageEvent('/mode'));
+  assert.match(JSON.stringify(api.lastCard), /排队/u);
 });
