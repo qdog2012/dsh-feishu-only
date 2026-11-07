@@ -684,3 +684,41 @@ test('every settings kind renders one option per row', () => {
     }
   }
 });
+
+test('the current-task card does not repeat the last reply', () => {
+  // The answer already arrives as its own result card when a round ends, so
+  // showing it again here printed the same long text twice.
+  const payload = currentTaskCard({
+    task: {
+      id: 's1', title: '任务', project: 'p', model: 'p/m', reasoning: 'high',
+      permission: 'never', mode: '普通模式', status: '空闲', goal: '未设置', context: '0',
+      lastResult: '这段内容不应该出现在当前任务卡片里',
+    },
+  });
+  const text = JSON.stringify(payload);
+  assert.ok(!text.includes('最近回复'), 'no 最近回复 section');
+  assert.ok(!text.includes('这段内容不应该出现'), 'and the reply text is not shown');
+  // The configuration that decides the next round is still there.
+  assert.ok(text.includes('模型'), 'model is still stated');
+  assert.ok(text.includes('推理强度'));
+  assert.ok(text.includes('权限模式'));
+});
+
+test('a search hit is selected by its own title', () => {
+  const payload = taskSearchCard({
+    keyword: '重构',
+    results: [
+      { title: '重构卡片布局', isCurrent: true },
+      { title: '重构长连接' },
+    ],
+    page: 1, totalPages: 1, pageKey: 'k',
+  });
+  const select = buttonsOf(payload).filter((b) => b.behaviors[0].value.id === 'task.select');
+  assert.equal(select.length, 2);
+  assert.equal(select[0].text.content, '1. 重构卡片布局 [当前]');
+  assert.equal(select[1].text.content, '2. 重构长连接');
+  assert.equal(select[0].type, 'primary', 'the current task is the primary button');
+  const text = JSON.stringify(payload);
+  assert.ok(!text.includes('选择 1'), 'no separate numbered button row');
+  assert.equal(text.split('重构卡片布局').length - 1, 1, 'the title appears once');
+});
