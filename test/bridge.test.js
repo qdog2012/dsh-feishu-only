@@ -1126,3 +1126,71 @@ test('an empty typed path does nothing', async () => {
   assert.match(JSON.stringify(toast ?? {}), /请先填写路径/u);
 });
 
+test('a picker press returns the new card as the callback response', async () => {
+  // The card flashed back because the callback response was a bare toast:
+  // Feishu applies that response AFTER the HTTP patch, and a response without
+  // a card restores the pre-press content. The response must carry the card.
+  const harness = new FakeHarness();
+  harness.directoryListing = { path: 'D:/work', home: 'D:/work', crumbs: [], entries: [], truncated: false };
+  const { bridge } = makeBridge({ harness });
+  const response = await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_r', open_chat_id: 'oc_1' },
+  });
+  assert.ok(response, 'the handler returned something');
+  assert.equal(response.card?.type, 'raw', 'a raw card is returned');
+  assert.ok(response.card.data, 'carrying the new card');
+  assert.match(JSON.stringify(response.card.data), /选择路径/u, 'which is the picker');
+});
+
+test('navigating returns the new card too, so it does not revert', async () => {
+  const harness = new FakeHarness();
+  harness.directoryListing = (path) => ({
+    path: path ?? 'D:/work',
+    home: 'D:/work',
+    crumbs: [],
+    entries: path === 'D:/work/sub' ? [] : [{ name: 'sub', path: 'D:/work/sub', hidden: false }],
+    truncated: false,
+  });
+  const { bridge } = makeBridge({ harness });
+  const response = await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.dir', path: 'D:/work/sub' } },
+    context: { open_message_id: 'om_s2', open_chat_id: 'oc_1' },
+  });
+  assert.equal(response.card?.type, 'raw');
+  assert.match(JSON.stringify(response.card.data), /没有子目录/u, 'the new level is in the response');
+});
+
+test('creating a folder returns both the card and the toast', async () => {
+  // A toast alone would confirm the side effect while the card reverted.
+  const harness = new FakeHarness();
+  harness.directoryListing = { path: 'D:/work', home: 'D:/work', crumbs: [], entries: [], truncated: false };
+  harness.createDirectory = async (path, name) => ({ ok: true, value: `${path}/${name}` });
+  const { bridge } = makeBridge({ harness });
+  const response = await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.dir.mkdir', path: 'D:/work' },
+      form_value: { name: 'made' },
+    },
+    context: { open_message_id: 'om_t', open_chat_id: 'oc_1' },
+  });
+  assert.equal(response.card?.type, 'raw', 'the card travels with the toast');
+  assert.match(response.toast?.content ?? '', /已创建文件夹 made/u);
+});
+
+test('pressing 用这个目录 returns the name form as the response', async () => {
+  const harness = new FakeHarness();
+  const { bridge } = makeBridge({ harness });
+  const response = await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.dir.pick', path: 'D:/work/final' } },
+    context: { open_message_id: 'om_p2', open_chat_id: 'oc_1' },
+  });
+  assert.equal(response.card?.type, 'raw');
+  assert.match(JSON.stringify(response.card.data), /project\.create\.submit/u, 'the name form is returned');
+});
+
