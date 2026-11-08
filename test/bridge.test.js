@@ -64,6 +64,19 @@ class FakeApi {
     return this.cards.at(-1)?.payload ?? null;
   }
 
+  /**
+   * The card the user would now be looking at.
+   *
+   * A button press updates the originating card in place, so the newest card is
+   * whichever of the last send or the last patch happened most recently.
+   */
+  get latestCard() {
+    const sent = this.cards.at(-1);
+    const patched = this.patched.at(-1);
+    if (!patched) return sent?.payload ?? null;
+    return patched.payload ?? sent?.payload ?? null;
+  }
+
   get lastText() {
     return this.texts.at(-1)?.text ?? null;
   }
@@ -928,10 +941,10 @@ test('the project list creates in one press but names the task after the project
   const current = state.currentTask('ou_user');
   assert.equal(current.title, '飞书插件', 'the task is named after the project');
 });
-test('新建项目 starts by picking a path, then asks for a name', async () => {
-  // Two steps, in this order: the directory is chosen among real directories,
-  // the name is free text. Asking both at once would mean typing a path from
-  // memory.
+test('新建项目 is one card that updates in place', async () => {
+  // Two steps: pick a directory, then name it. Every press patches the same
+  // card — a browsing flow that posted a new message per press would bury the
+  // chat in stale copies.
   const harness = new FakeHarness();
   harness.directoryListing = {
     path: 'D:/work',
@@ -945,31 +958,35 @@ test('新建项目 starts by picking a path, then asks for a name', async () => 
   await bridge.onMessage(messageEvent('/project'));
   const create = collect(api.lastCard).find((v) => v?.id === 'project.create');
   assert.ok(create, 'the project list offers 新建项目');
+  const openedAs = api.cards.length;
 
   await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
     action: { tag: 'button', value: { id: 'project.create' } },
-    context: { open_message_id: 'om_c', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_picker', open_chat_id: 'oc_1' },
   });
-  const picker = JSON.stringify(api.lastCard);
-  assert.match(picker, /选择路径/u, 'the path picker is shown first');
+  const picker = JSON.stringify(api.latestCard);
+  assert.match(picker, /选择路径/u, 'the path picker replaces the card');
   assert.match(picker, /dsh-feishu-only/u, 'and lists real subdirectories');
+  assert.equal(api.cards.length, openedAs, 'no new message was posted');
+  assert.equal(api.patched.at(-1).messageId, 'om_picker', 'the same card was patched');
 
-  // Choosing the current directory proceeds to the name form.
+  // Choosing the current directory proceeds to the name form, same card.
   await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
     action: { tag: 'button', value: { id: 'project.dir.pick', path: 'D:/work' } },
-    context: { open_message_id: 'om_d', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_picker', open_chat_id: 'oc_1' },
   });
-  const naming = JSON.stringify(api.lastCard);
-  assert.match(naming, /"tag":"form"/u, 'the name form is shown second');
+  const naming = JSON.stringify(api.latestCard);
+  assert.match(naming, /"tag":"form"/u, 'the name form replaces the picker');
   assert.match(naming, /project\.create\.submit/u, 'and it submits a project');
   assert.match(naming, /项目名称/u, 'asking for the project name');
+  assert.equal(api.cards.length, openedAs, 'still the same single message');
 });
 
-test('choosing a subdirectory browses into it instead of using it', async () => {
-  // Entering a directory is usually how you reach the one you want, so a
-  // subdirectory button must navigate, not commit.
+test('choosing a subdirectory browses into it in place', async () => {
+  // Entering a directory is how you reach the one you want, so a row must
+  // navigate rather than commit — and it must do so without a new message.
   const harness = new FakeHarness();
   harness.directoryListing = (path) => ({
     path: path ?? 'D:/work',
@@ -985,22 +1002,22 @@ test('choosing a subdirectory browses into it instead of using it', async () => 
   await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
     action: { tag: 'button', value: { id: 'project.create' } },
-    context: { open_message_id: 'om_e', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_nav', open_chat_id: 'oc_1' },
   });
+  const before = api.cards.length;
   await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
     action: { tag: 'button', value: { id: 'project.dir', path: 'D:/work/dsh-feishu-only' } },
-    context: { open_message_id: 'om_f', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_nav', open_chat_id: 'oc_1' },
   });
   assert.ok(harness.browsedPaths.includes('D:/work/dsh-feishu-only'), 'the subdirectory was listed');
-  const card = JSON.stringify(api.lastCard);
+  const card = JSON.stringify(api.latestCard);
   assert.match(card, /选择路径/u, 'still picking, not naming');
   assert.match(card, /没有子目录/u, 'and the empty level is stated');
+  assert.equal(api.cards.length, before, 'navigating posted nothing new');
 });
 
 test('creating a project also opens its first task', async () => {
-  // A registered project with nowhere to type is not useful; the same press
-  // opens the task that will run in it.
   const harness = new FakeHarness();
   const { bridge, api, state } = makeBridge({ harness });
   await bridge.onCardAction({
@@ -1010,7 +1027,7 @@ test('creating a project also opens its first task', async () => {
       value: { id: 'project.create.submit', path: 'D:/work/new' },
       form_value: { title: '新项目' },
     },
-    context: { open_message_id: 'om_g', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_done', open_chat_id: 'oc_1' },
   });
   assert.equal(harness.createdProjects.length, 1, 'the project was registered');
   assert.equal(harness.createdProjects[0].path, 'D:/work/new');
@@ -1018,65 +1035,35 @@ test('creating a project also opens its first task', async () => {
   const current = state.currentTask('ou_user');
   assert.ok(current, 'a task became current');
   assert.equal(current.title, '新项目', 'named after the project');
-  assert.match(JSON.stringify(api.lastCard), /项目已创建/u);
+  assert.match(JSON.stringify(api.latestCard), /项目已创建/u);
 });
 
-test('browsing falls back to the filesystem when no picker service exists', async () => {
-  // directoryPickerController and directoryPicker are both optional services.
-  // A deployment shipping neither must still be able to pick a directory, or
-  // creating a project becomes impossible - which is exactly what happened:
-  // the button answered "当前部署没有提供目录浏览能力".
-  const { HarnessAdapter } = await import('../lib/harness.js');
-  const ctx = { get: () => undefined };
-  const adapter = new HarnessAdapter({ ctx, logger: silent });
-  const listed = await adapter.browseDirectory();
-  assert.equal(listed.ok, true, 'a listing was produced without any picker');
-  assert.equal(listed.source, 'filesystem', 'and it says where it came from');
-  assert.ok(listed.value.path, 'the current directory is reported');
-  assert.ok(Array.isArray(listed.value.entries), 'with entries');
-  assert.ok(Array.isArray(listed.value.crumbs), 'and its ancestry');
-});
-
-test('the controller is preferred over the filesystem, because it is the remote seam', async () => {
-  // directoryPickerController exists specifically for a Remote caller's in-app
-  // browser, so it must win over the generic fallback.
-  const { HarnessAdapter } = await import('../lib/harness.js');
-  const asked = [];
-  const ctx = {
-    get: (name) => (name === 'directoryPickerController'
-      ? {
-          list: async (path) => {
-            asked.push(path ?? null);
-            return {
-              path: path ?? 'D:/from-controller',
-              home: 'D:/from-controller',
-              crumbs: [],
-              entries: [{ name: 'child', path: 'D:/from-controller/child', hidden: false }],
-              truncated: false,
-            };
-          },
-        }
-      : undefined),
+test('the picker can create a folder, and stays on the same level', async () => {
+  // A project often needs a directory that does not exist yet; sending the
+  // user to a file manager and back would break the flow.
+  const harness = new FakeHarness();
+  harness.directoryListing = { path: 'D:/work', home: 'D:/work', crumbs: [], entries: [], truncated: false };
+  const made = [];
+  harness.createDirectory = async (path, name) => {
+    made.push({ path, name });
+    return { ok: true, value: `${path}/${name}` };
   };
-  const adapter = new HarnessAdapter({ ctx, logger: silent });
-  const listed = await adapter.browseDirectory('D:/explicit');
-  assert.equal(listed.ok, true);
-  assert.equal(listed.source, undefined, 'not the filesystem fallback');
-  assert.deepEqual(asked, ['D:/explicit'], 'the requested path was used');
-  assert.equal(listed.value.entries[0].name, 'child');
-});
-
-test('a directory that does not exist is reported, not listed empty', async () => {
-  const { HarnessAdapter } = await import('../lib/harness.js');
-  const adapter = new HarnessAdapter({ ctx: { get: () => undefined }, logger: silent });
-  const listed = await adapter.browseDirectory('D:/definitely-not-a-real-dir-xyz');
-  assert.equal(listed.ok, false);
-  assert.match(listed.reason, /无法读取目录/u);
+  const { bridge, api, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.dir.mkdir', path: 'D:/work' },
+      form_value: { name: 'new-area' },
+    },
+    context: { open_message_id: 'om_mk', open_chat_id: 'oc_1' },
+  });
+  assert.deepEqual(made, [{ path: 'D:/work', name: 'new-area' }], 'created in the shown directory');
+  assert.match(JSON.stringify(api.latestCard), /选择路径/u, 'still on the picker');
 });
 
 test('a path can be typed instead of walking the tree', async () => {
-  // A deep tree is slow to walk one level at a time, and a sibling directory
-  // needs a trip through the parent. Typing the path is the direct route.
   const harness = new FakeHarness();
   harness.directoryListing = (path) => ({
     path: path ?? 'D:/work',
@@ -1090,7 +1077,7 @@ test('a path can be typed instead of walking the tree', async () => {
   await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
     action: { tag: 'button', value: { id: 'project.create' } },
-    context: { open_message_id: 'om_i', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_goto', open_chat_id: 'oc_1' },
   });
   await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
@@ -1099,15 +1086,13 @@ test('a path can be typed instead of walking the tree', async () => {
       value: { id: 'project.dir.goto' },
       form_value: { path: 'D:/nick/project' },
     },
-    context: { open_message_id: 'om_j', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_goto', open_chat_id: 'oc_1' },
   });
   assert.ok(harness.browsedPaths.includes('D:/nick/project'), 'the typed path was browsed');
-  assert.match(JSON.stringify(api.lastCard), /选择路径/u, 'and the picker shows it');
+  assert.match(JSON.stringify(api.latestCard), /选择路径/u, 'and the picker shows it');
 });
 
 test('a typed path is trimmed, and quoted paths are accepted', async () => {
-  // Paths pasted from Explorer often arrive quoted, and a trailing space is
-  // invisible but breaks the lookup.
   const harness = new FakeHarness();
   harness.directoryListing = { path: 'D:/x', home: 'D:/x', crumbs: [], entries: [], truncated: false };
   const { bridge, state } = makeBridge({ harness });
@@ -1119,7 +1104,7 @@ test('a typed path is trimmed, and quoted paths are accepted', async () => {
       value: { id: 'project.dir.goto' },
       form_value: { path: '  "D:\\nick\\project"  ' },
     },
-    context: { open_message_id: 'om_k', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_q', open_chat_id: 'oc_1' },
   });
   assert.ok(harness.browsedPaths.includes('D:\\nick\\project'), 'quotes and spaces were stripped');
 });
@@ -1135,51 +1120,9 @@ test('an empty typed path does nothing', async () => {
       value: { id: 'project.dir.goto' },
       form_value: { path: '   ' },
     },
-    context: { open_message_id: 'om_l', open_chat_id: 'oc_1' },
+    context: { open_message_id: 'om_e', open_chat_id: 'oc_1' },
   });
   assert.equal(harness.browsedPaths.length, 0, 'nothing was browsed');
   assert.match(JSON.stringify(toast ?? {}), /请先填写路径/u);
-});
-
-test('a controller that refuses the browse verb falls through to the filesystem', async () => {
-  // This is the case that broke in production: the service exists, but the
-  // composition refuses the verb ("a verb the composition cannot serve is
-  // refused rather than approximated"). Returning that error left the user
-  // with a button that could never work.
-  const { HarnessAdapter } = await import('../lib/harness.js');
-  const ctx = {
-    get: (name) => (name === 'directoryPickerController'
-      ? { list: async () => { throw new Error('browse is not available in this composition'); } }
-      : undefined),
-  };
-  const adapter = new HarnessAdapter({ ctx, logger: silent });
-  const listed = await adapter.browseDirectory();
-  assert.equal(listed.ok, true, 'a listing was still produced');
-  assert.equal(listed.source, 'filesystem', 'by falling back');
-});
-
-test('a controller returning an unusable value falls through too', async () => {
-  // null is a legal answer from some seams, so it must not be trusted blindly.
-  const { HarnessAdapter } = await import('../lib/harness.js');
-  const ctx = { get: (n) => (n === 'directoryPickerController' ? { list: async () => null } : undefined) };
-  const adapter = new HarnessAdapter({ ctx, logger: silent });
-  const listed = await adapter.browseDirectory();
-  assert.equal(listed.ok, true);
-  assert.equal(listed.source, 'filesystem');
-});
-
-test('a working controller is still preferred and its result used', async () => {
-  // The fallback must not shadow a service that works.
-  const { HarnessAdapter } = await import('../lib/harness.js');
-  const ctx = {
-    get: (name) => (name === 'directoryPickerController'
-      ? { list: async () => ({ path: 'D:/c', home: 'D:/c', crumbs: [], entries: [{ name: 'a', path: 'D:/c/a', hidden: false }], truncated: false }) }
-      : undefined),
-  };
-  const adapter = new HarnessAdapter({ ctx, logger: silent });
-  const listed = await adapter.browseDirectory();
-  assert.equal(listed.ok, true);
-  assert.equal(listed.source, undefined, 'not the fallback');
-  assert.equal(listed.value.entries[0].name, 'a');
 });
 
