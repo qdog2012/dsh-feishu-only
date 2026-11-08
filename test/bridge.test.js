@@ -1209,3 +1209,66 @@ test('pressing 用这个目录 returns the name form as the response', async () 
   assert.match(JSON.stringify(response.card.data), /project\.create\.submit/u, 'the name form is returned');
 });
 
+test('the mkdir button carries the directory it was rendered for', async () => {
+  // The button used to send only pageKey. The handler then read an empty path,
+  // resolved it against the process working directory, and created the folder
+  // inside the harness profile instead of the directory on screen.
+  const harness = new FakeHarness();
+  harness.directoryListing = {
+    path: 'D:/nick/project',
+    home: 'C:/Users/Administrator',
+    crumbs: [],
+    entries: [],
+    truncated: false,
+  };
+  const { bridge, api, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_a', open_chat_id: 'oc_1' },
+  });
+
+  // Read the value the button actually carries - not one the test invents.
+  const card = api.latestCard;
+  const form = card.body.elements.find((el) => el.tag === 'form'
+    && el.elements?.some((e) => e.behaviors?.[0]?.value?.id === 'project.dir.mkdir'));
+  assert.ok(form, 'the picker has a mkdir form');
+  const button = form.elements.find((e) => e.behaviors?.[0]?.value?.id === 'project.dir.mkdir');
+  assert.equal(button.behaviors[0].value.path, 'D:/nick/project',
+    'the button names the directory it belongs to');
+});
+
+test('a mkdir press without a path is refused instead of writing to the cwd', async () => {
+  // The exact production failure: no path meant "create it relative to the
+  // process working directory", which is the harness profile.
+  const harness = new FakeHarness();
+  const made = [];
+  harness.createDirectory = async (path, name) => {
+    made.push({ path, name });
+    return { ok: true, value: `${path}/${name}` };
+  };
+  const { bridge } = makeBridge({ harness });
+  const response = await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.dir.mkdir' },
+      form_value: { name: 'dsh-test' },
+    },
+    context: { open_message_id: 'om_b', open_chat_id: 'oc_1' },
+  });
+  assert.equal(made.length, 0, 'nothing was created');
+  assert.match(response.toast?.content ?? '', /没有带上目录信息/u, 'and the reason is stated');
+});
+
+test('createDirectory refuses a blank parent path at the adapter level too', async () => {
+  // Belt and braces: even a caller that forgets the path must not cause a write
+  // into whatever directory the process happens to be in.
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const adapter = new HarnessAdapter({ ctx: { get: () => undefined }, logger: silent });
+  const blank = await adapter.createDirectory('', 'dsh-test');
+  assert.equal(blank.ok, false, 'a blank parent is refused');
+  assert.match(blank.reason, /缺少父目录路径/u);
+});
+
