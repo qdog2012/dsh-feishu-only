@@ -135,3 +135,26 @@ test('the notification card is schema 2.0 with div-wrapped text', async () => {
     assert.ok(['div', 'hr'].includes(element.tag), `element tag "${element.tag}" is schema 2.0`);
   }
 });
+test('a recovery after a drop is never suppressed, but a repeat is', () => {
+  // The production symptom: 机器人已断开 arrived and then nothing, because the
+  // recovery landed inside the flap window opened by the disconnect notice.
+  // Suppression must tell "repeating myself" apart from "answering a drop".
+  const now = 1_000_000;
+
+  // Recovery answering a disconnect: must go out even one second later.
+  assert.equal(
+    shouldSuppress(now - 1_000, now, 'connected', 'disconnected'),
+    false,
+    'a recovery after a drop is new information',
+  );
+
+  // Two recoveries in a row with nothing between: that is flapping.
+  assert.equal(shouldSuppress(now - 1_000, now, 'connected', 'connected'), true);
+
+  // Outside the window it is never suppressed.
+  assert.equal(shouldSuppress(now - 61_000, now, 'connected', 'connected'), false);
+
+  // A disconnect is never suppressed, whatever came before.
+  assert.equal(shouldSuppress(now - 1_000, now, 'disconnected', 'disconnected'), false);
+  assert.equal(shouldSuppress(now - 1_000, now, 'disconnected', 'connected'), false);
+});

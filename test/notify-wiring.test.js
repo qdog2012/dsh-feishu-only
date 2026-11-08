@@ -295,4 +295,69 @@ test('notices are disabled when notifyConnection is false', async () => {
 
 function settle(ms = 200) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
+}test('a dropped connection reports both the drop and the recovery', async () => {
+  // The card said 机器人已断开 and then nothing: the re-entering-connections
+  // branch was documented but never written, so a user could not tell whether
+  // the bot was listening again.
+  const notices = [];
+  const handlers = new Map();
+  const ws = {
+    state: 'stopped',
+    on(eventType, handler) {
+      if (!handlers.has(eventType)) handlers.set(eventType, []);
+      handlers.get(eventType).push(handler);
+      return () => {};
+    },
+    emit(eventType, payload) {
+      for (const handler of handlers.get(eventType) ?? []) handler(payload);
+    },
+  };
+  const fire = (from, to) => ws.emit('state.change', { from, to });
+
+  // Mirror the transition rule the plugin installs.
+  const CONNECTED = 'connected';
+  const CONNECTING = 'connecting';
+  const onTransition = ({ from, to }) => {
+    if (from === CONNECTED && to !== CONNECTED) notices.push('disconnected');
+    else if (from !== CONNECTED && to === CONNECTED) {
+      if (from !== CONNECTING) notices.push('connected');
+    }
+  };
+
+  onTransition({ from: CONNECTING, to: CONNECTED });
+  assert.deepEqual(notices, [], 'the first connect is startRuntime\'s job, not a recovery');
+
+  onTransition({ from: CONNECTED, to: 'reconnecting' });
+  assert.deepEqual(notices, ['disconnected'], 'the drop is reported');
+
+  onTransition({ from: 'reconnecting', to: CONNECTED });
+  assert.deepEqual(notices, ['disconnected', 'connected'], 'and so is coming back');
+});
+
+
+test('a drop is followed by a recovery notice once the line comes back', async () => {
+  // The user saw 机器人已断开 and then nothing, so there was no way to know the
+  // bot had recovered. The socket does reconnect on its own; what was missing
+  // was the notice for coming back.
+  await withLiveBridge({ notifyConnection: true }, async ({ routes, sockets, notices }) => {
+    await settle();
+    sockets.at(-1).deliver(messageFrame('ou_user', '你好'));
+    await settle();
+
+    // Drop the line: this must produce a disconnect notice.
+    sockets.at(-1).close();
+    await settle();
+    assert.ok(notices.some((n) => /已断开/u.test(n.title)), 'the drop was reported');
+
+    // Bring it back the way the client does after a drop: a fresh connect.
+    const connect = routes.find((r) => r.path.endsWith('/connect'));
+    await connect.resource(new Request('http://x/connect?appId=cli_x&appSecret=S'));
+    await settle();
+
+    const titles = notices.map((n) => n.title);
+    assert.ok(
+      notices.some((n) => /已连接/u.test(n.title)),
+      `a recovery notice was delivered (saw: ${titles.join(' | ')})`,
+    );
+  });
+});

@@ -235,6 +235,8 @@ export async function apply(ctx, rawConfig) {
   };
   /** When the last notice went out, for flap suppression. */
   let lastNoticeAt = NaN;
+  /** Which notice went out last, so a recovery after a drop is never suppressed. */
+  let lastNoticeEvent = null;
 
   /** Where the notice recipients survive a restart. */
   const operatorsFile = () => {
@@ -312,12 +314,13 @@ export async function apply(ctx, rawConfig) {
         logger.debug?.('[feishu] no operator to notify yet');
         return;
       }
-      if (shouldSuppress(lastNoticeAt, Date.now(), event)) {
+      if (shouldSuppress(lastNoticeAt, Date.now(), event, lastNoticeEvent)) {
         noteDiagnostic({ kind: 'notice-skipped', why: 'suppressed', event });
         logger.debug?.('[feishu] connection notice suppressed as flapping');
         return;
       }
       lastNoticeAt = Date.now();
+      lastNoticeEvent = event;
       noteDiagnostic({ kind: 'notice-sent', event, to: openId });
       void sendConnectionNotice({ api, logger }, { openId, event, reason })
         .then((ok) => noteDiagnostic({ kind: ok ? 'notice-delivered' : 'notice-failed', event }))
@@ -374,12 +377,18 @@ export async function apply(ctx, rawConfig) {
 
     disposers.push(interactions.install());
 
-    // Connection transitions, straight from the socket: connected -> anything
-    // else is a disconnect worth reporting, and re-entering connected after a
-    // drop is a recovery worth reporting too.
+    // Connection transitions, straight from the socket. Both directions matter:
+    // a drop is worth reporting, and so is coming back — otherwise a user who
+    // saw "机器人已断开" never learns that it recovered, and has to guess
+    // whether the bot is listening again.
     disposers.push(ws.on('state.change', ({ from, to }) => {
       if (from === WS_STATE.CONNECTED && to !== WS_STATE.CONNECTED) {
         notify('disconnected', `连接状态：${to}`);
+      } else if (from !== WS_STATE.CONNECTED && to === WS_STATE.CONNECTED) {
+        // Only for a RECOVERY, not the first connect: `startRuntime` already
+        // sends the initial notice, and two cards for one connection would look
+        // like flapping.
+        if (from !== WS_STATE.CONNECTING) notify('connected');
       }
     }));
 
