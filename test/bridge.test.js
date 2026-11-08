@@ -1272,3 +1272,23 @@ test('createDirectory refuses a blank parent path at the adapter level too', asy
   assert.match(blank.reason, /缺少父目录路径/u);
 });
 
+test('a broken project root falls back to the home directory instead of failing', async () => {
+  // The configured path can be deleted or point at a drive that is gone; that
+  // must not make the button dead.
+  const harness = new FakeHarness();
+  harness.browseDirectory = async (path) => {
+    harness.browsedPaths.push(path ?? null);
+    if (path === 'Z:/gone') return { ok: false, reason: '目录不存在' };
+    return { ok: true, value: { path: 'C:/Users/me', home: 'C:/Users/me', crumbs: [], entries: [], truncated: false } };
+  };
+  const { bridge, api } = makeBridge({ harness, config: { projectRoot: 'Z:/gone' } });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_t', open_chat_id: 'oc_1' },
+  });
+  assert.equal(harness.browsedPaths[0], 'Z:/gone', 'it tried the configured root');
+  assert.equal(harness.browsedPaths[1], null, 'then fell back to the default');
+  assert.match(JSON.stringify(api.latestCard), /选择路径/u, 'and the picker still opened');
+  assert.ok(api.texts.some((t) => /默认项目路径不可用/u.test(t.text)), 'the fallback was explained');
+});
