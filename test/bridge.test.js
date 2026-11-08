@@ -1021,16 +1021,123 @@ test('creating a project also opens its first task', async () => {
   assert.match(JSON.stringify(api.lastCard), /项目已创建/u);
 });
 
-test('a missing directory picker is reported, not silently ignored', async () => {
-  // The browse picker is a plugin; a deployment without it must say so.
+test('browsing falls back to the filesystem when no picker service exists', async () => {
+  // directoryPickerController and directoryPicker are both optional services.
+  // A deployment shipping neither must still be able to pick a directory, or
+  // creating a project becomes impossible - which is exactly what happened:
+  // the button answered "当前部署没有提供目录浏览能力".
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const ctx = { get: () => undefined };
+  const adapter = new HarnessAdapter({ ctx, logger: silent });
+  const listed = await adapter.browseDirectory();
+  assert.equal(listed.ok, true, 'a listing was produced without any picker');
+  assert.equal(listed.source, 'filesystem', 'and it says where it came from');
+  assert.ok(listed.value.path, 'the current directory is reported');
+  assert.ok(Array.isArray(listed.value.entries), 'with entries');
+  assert.ok(Array.isArray(listed.value.crumbs), 'and its ancestry');
+});
+
+test('the controller is preferred over the filesystem, because it is the remote seam', async () => {
+  // directoryPickerController exists specifically for a Remote caller's in-app
+  // browser, so it must win over the generic fallback.
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const asked = [];
+  const ctx = {
+    get: (name) => (name === 'directoryPickerController'
+      ? {
+          list: async (path) => {
+            asked.push(path ?? null);
+            return {
+              path: path ?? 'D:/from-controller',
+              home: 'D:/from-controller',
+              crumbs: [],
+              entries: [{ name: 'child', path: 'D:/from-controller/child', hidden: false }],
+              truncated: false,
+            };
+          },
+        }
+      : undefined),
+  };
+  const adapter = new HarnessAdapter({ ctx, logger: silent });
+  const listed = await adapter.browseDirectory('D:/explicit');
+  assert.equal(listed.ok, true);
+  assert.equal(listed.source, undefined, 'not the filesystem fallback');
+  assert.deepEqual(asked, ['D:/explicit'], 'the requested path was used');
+  assert.equal(listed.value.entries[0].name, 'child');
+});
+
+test('a directory that does not exist is reported, not listed empty', async () => {
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const adapter = new HarnessAdapter({ ctx: { get: () => undefined }, logger: silent });
+  const listed = await adapter.browseDirectory('D:/definitely-not-a-real-dir-xyz');
+  assert.equal(listed.ok, false);
+  assert.match(listed.reason, /无法读取目录/u);
+});
+
+test('a path can be typed instead of walking the tree', async () => {
+  // A deep tree is slow to walk one level at a time, and a sibling directory
+  // needs a trip through the parent. Typing the path is the direct route.
+  const harness = new FakeHarness();
+  harness.directoryListing = (path) => ({
+    path: path ?? 'D:/work',
+    home: 'D:/work',
+    crumbs: [],
+    entries: [],
+    truncated: false,
+  });
+  const { bridge, api, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: { tag: 'button', value: { id: 'project.create' } },
+    context: { open_message_id: 'om_i', open_chat_id: 'oc_1' },
+  });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.dir.goto' },
+      form_value: { path: 'D:/nick/project' },
+    },
+    context: { open_message_id: 'om_j', open_chat_id: 'oc_1' },
+  });
+  assert.ok(harness.browsedPaths.includes('D:/nick/project'), 'the typed path was browsed');
+  assert.match(JSON.stringify(api.lastCard), /选择路径/u, 'and the picker shows it');
+});
+
+test('a typed path is trimmed, and quoted paths are accepted', async () => {
+  // Paths pasted from Explorer often arrive quoted, and a trailing space is
+  // invisible but breaks the lookup.
+  const harness = new FakeHarness();
+  harness.directoryListing = { path: 'D:/x', home: 'D:/x', crumbs: [], entries: [], truncated: false };
+  const { bridge, state } = makeBridge({ harness });
+  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
+  await bridge.onCardAction({
+    operator: { open_id: 'ou_user' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.dir.goto' },
+      form_value: { path: '  "D:\\nick\\project"  ' },
+    },
+    context: { open_message_id: 'om_k', open_chat_id: 'oc_1' },
+  });
+  assert.ok(harness.browsedPaths.includes('D:\\nick\\project'), 'quotes and spaces were stripped');
+});
+
+test('an empty typed path does nothing', async () => {
   const harness = new FakeHarness();
   const { bridge, state } = makeBridge({ harness });
   state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
   const toast = await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
-    action: { tag: 'button', value: { id: 'project.create' } },
-    context: { open_message_id: 'om_h', open_chat_id: 'oc_1' },
+    action: {
+      tag: 'button',
+      value: { id: 'project.dir.goto' },
+      form_value: { path: '   ' },
+    },
+    context: { open_message_id: 'om_l', open_chat_id: 'oc_1' },
   });
-  assert.match(JSON.stringify(toast ?? {}), /目录浏览/u, 'the reason is stated');
+  assert.equal(harness.browsedPaths.length, 0, 'nothing was browsed');
+  assert.match(JSON.stringify(toast ?? {}), /请先填写路径/u);
 });
 
