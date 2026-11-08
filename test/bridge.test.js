@@ -1141,3 +1141,45 @@ test('an empty typed path does nothing', async () => {
   assert.match(JSON.stringify(toast ?? {}), /请先填写路径/u);
 });
 
+test('a controller that refuses the browse verb falls through to the filesystem', async () => {
+  // This is the case that broke in production: the service exists, but the
+  // composition refuses the verb ("a verb the composition cannot serve is
+  // refused rather than approximated"). Returning that error left the user
+  // with a button that could never work.
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const ctx = {
+    get: (name) => (name === 'directoryPickerController'
+      ? { list: async () => { throw new Error('browse is not available in this composition'); } }
+      : undefined),
+  };
+  const adapter = new HarnessAdapter({ ctx, logger: silent });
+  const listed = await adapter.browseDirectory();
+  assert.equal(listed.ok, true, 'a listing was still produced');
+  assert.equal(listed.source, 'filesystem', 'by falling back');
+});
+
+test('a controller returning an unusable value falls through too', async () => {
+  // null is a legal answer from some seams, so it must not be trusted blindly.
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const ctx = { get: (n) => (n === 'directoryPickerController' ? { list: async () => null } : undefined) };
+  const adapter = new HarnessAdapter({ ctx, logger: silent });
+  const listed = await adapter.browseDirectory();
+  assert.equal(listed.ok, true);
+  assert.equal(listed.source, 'filesystem');
+});
+
+test('a working controller is still preferred and its result used', async () => {
+  // The fallback must not shadow a service that works.
+  const { HarnessAdapter } = await import('../lib/harness.js');
+  const ctx = {
+    get: (name) => (name === 'directoryPickerController'
+      ? { list: async () => ({ path: 'D:/c', home: 'D:/c', crumbs: [], entries: [{ name: 'a', path: 'D:/c/a', hidden: false }], truncated: false }) }
+      : undefined),
+  };
+  const adapter = new HarnessAdapter({ ctx, logger: silent });
+  const listed = await adapter.browseDirectory();
+  assert.equal(listed.ok, true);
+  assert.equal(listed.source, undefined, 'not the fallback');
+  assert.equal(listed.value.entries[0].name, 'a');
+});
+
