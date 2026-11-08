@@ -1038,19 +1038,25 @@ test('creating a project also opens its first task', async () => {
   assert.match(JSON.stringify(api.latestCard), /项目已创建/u);
 });
 
-test('the picker can create a folder, and stays on the same level', async () => {
-  // A project often needs a directory that does not exist yet; sending the
-  // user to a file manager and back would break the flow.
+test('creating a folder enters it, so the next press can use it', async () => {
+  // The new directory is empty: re-listing its parent would leave the user
+  // hunting for a row they just made. Entering it means the very next action
+  // available is "用这个目录".
   const harness = new FakeHarness();
-  harness.directoryListing = { path: 'D:/work', home: 'D:/work', crumbs: [], entries: [], truncated: false };
+  harness.directoryListing = (path) => ({
+    path: path ?? 'D:/work',
+    home: 'D:/work',
+    crumbs: [],
+    entries: path === 'D:/work/new-area' ? [] : [{ name: 'new-area', path: 'D:/work/new-area', hidden: false }],
+    truncated: false,
+  });
   const made = [];
   harness.createDirectory = async (path, name) => {
     made.push({ path, name });
     return { ok: true, value: `${path}/${name}` };
   };
-  const { bridge, api, state } = makeBridge({ harness });
-  state.setCurrentTask('ou_user', { sessionId: 's1', label: '任务' });
-  await bridge.onCardAction({
+  const { bridge } = makeBridge({ harness });
+  const response = await bridge.onCardAction({
     operator: { open_id: 'ou_user' },
     action: {
       tag: 'button',
@@ -1060,7 +1066,16 @@ test('the picker can create a folder, and stays on the same level', async () => 
     context: { open_message_id: 'om_mk', open_chat_id: 'oc_1' },
   });
   assert.deepEqual(made, [{ path: 'D:/work', name: 'new-area' }], 'created in the shown directory');
-  assert.match(JSON.stringify(api.latestCard), /选择路径/u, 'still on the picker');
+
+  // The card now shows the NEW directory, not the parent list.
+  const shown = response.card?.data;
+  assert.ok(shown, 'the response carries the card');
+  assert.match(JSON.stringify(shown), /new-area/u, 'the new folder is the current path');
+  assert.ok(
+    harness.browsedPaths.includes('D:/work/new-area'),
+    'the new directory was browsed, not its parent',
+  );
+  assert.match(response.toast?.content ?? '', /已创建文件夹 new-area/u, 'and the toast confirms it');
 });
 
 test('a path can be typed instead of walking the tree', async () => {
