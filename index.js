@@ -33,6 +33,8 @@ import { diagnose } from './lib/diagnostics.js';
 import { noticeTarget, sendConnectionNotice, shouldSuppress } from './lib/notify.js';
 import { pluginConfigSchema, resolveConfig, PLUGIN_VERSION } from './lib/config.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -43,8 +45,30 @@ import { dirname, join } from 'node:path';
  * reporting the same value no matter how often the plugin is disabled, enabled
  * or reinstalled. It exists to make "did the reload take effect?" answerable
  * from the outside.
+ *
+ * It names the commit the RUNNING code came from, not the newest commit on
+ * disk: the host half is fixed at process start, so those two disagree until a
+ * restart. A timestamp alone could not answer the question it was added for.
  */
-const BUILD_ID = `${PLUGIN_VERSION}+${Date.now().toString(36)}`;
+const BUILD_ID = `${PLUGIN_VERSION}+${runningCommit()}`;
+
+/** The checked-out commit, or a timestamp when git is unavailable. */
+function runningCommit() {
+  try {
+    // Read the ref directly: spawning git here would add a subprocess to every
+    // start for a string that is only shown in /status.
+    const gitDir = fileURLToPath(new URL('./.git', import.meta.url));
+    const head = readFileSync(`${gitDir}/HEAD`, 'utf8').trim();
+    if (head.startsWith('ref: ')) {
+      const ref = head.slice(5).trim();
+      const sha = readFileSync(`${gitDir}/${ref}`, 'utf8').trim();
+      return sha.slice(0, 7);
+    }
+    return head.slice(0, 7);
+  } catch {
+    return Date.now().toString(36);
+  }
+}
 
 /**
  * The plugin's declared configuration schema.

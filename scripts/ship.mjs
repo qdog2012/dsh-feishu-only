@@ -84,6 +84,10 @@ const head = run(['rev-parse', '--short', 'HEAD'], { capture: true }).trim();
 const remote = run(['ls-remote', 'origin', 'HEAD'], { capture: true }).trim().split(/\s+/u)[0] ?? '';
 const synced = remote.startsWith(head) || run(['rev-parse', 'HEAD'], { capture: true }).trim() === remote;
 console.log(`\ncommitted ${head} ${synced ? '(pushed, in sync)' : '(WARNING: remote differs)'}`);
+// Committed is not running. The host half is loaded into Node's module cache at
+// process start, so nothing on disk takes effect until the app restarts —
+// reinstalling the plugin does not reload it either.
+console.log('NOTE: the running app still executes the previous code; restart it to load this commit.');
 
 /** The test files, resolved here so the test glob is not re-derived in a shell. */
 function testFiles() {
